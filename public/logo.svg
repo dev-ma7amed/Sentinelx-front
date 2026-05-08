@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <!-- Enterprise Shield with X -->
+  <!-- Shield outline -->
+  <path d="M16 2.5L7 6.5v7c0 6.5 4.5 11 9 12 4.5-1 9-5.5 9-12v-7l-9-4z"
+        fill="none" stroke="#2badee" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Security X (red accent) -->
+  <g stroke="#ff4757" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="12" x2="20" y2="20"/>
+    <line x1="20" y1="12" x2="12" y2="20"/>
+  </g>
+</svg>

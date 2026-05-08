@@ -1,0 +1,80 @@
+.soc-logo-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    color: inherit;
+    transition: all 0.2s ease;
+}
+
+.soc-logo-link:hover {
+    opacity: 0.9;
+}
+
+.soc-logo-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+}
+
+.soc-logo-img {
+    height: 28px;
+    width: auto;
+    max-width: 140px;
+    object-fit: contain;
+    display: block;
+}
+
+.soc-logo-img.h-8 {
+    height: 28px;
+}
+
+.soc-logo-img.w-auto {
+    width: auto;
+}
+
+.soc-logo-fallback {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.soc-logo-icon {
+    color: #2badee;
+}
+
+.soc-logo-text {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0;
+}
+
+.soc-logo-title {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: #e2edf3;
+    text-transform: none;
+}
+
+.soc-logo-tagline {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: #92b7c9;
+    text-transform: uppercase;
+}
+
+

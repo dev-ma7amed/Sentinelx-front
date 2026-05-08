@@ -1,0 +1,63 @@
+/* Shared app header: flex, spacing, control heights */
+.soc-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.soc-topbar-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.soc-btn-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.soc-filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.soc-filter-btn {
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 8px;
+    border: 1px solid #233c48;
+    background: #111c22;
+    color: #92b7c9;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.soc-filter-btn:hover {
+    background: #16242c;
+    color: #e2edf3;
+}
+
+.soc-filter-btn.active {
+    border-color: #2badee;
+    color: #e2edf3;
+    background: rgba(43, 173, 238, 0.12);
+}
+
+.soc-date-input {
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid #233c48;
+    background: #0f172a;
+    color: #e2edf3;
+    font-size: 13px;
+}

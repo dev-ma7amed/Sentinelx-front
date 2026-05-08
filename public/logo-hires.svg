@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" aria-hidden="true">
+  <!-- Background: transparent or very subtle -->
+
+  <!-- Enterprise Shield with X - Professional SOC Logo -->
+  <!-- Shield outline - clean and crisp -->
+  <path d="M256 40L112 104v112c0 104 72 176 144 192 72-16 144-88 144-192V104L256 40z"
+        fill="none" stroke="#2badee" stroke-width="18" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Security X (red accent) - elegant and sharp -->
+  <g stroke="#ff4757" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="192" y1="192" x2="320" y2="320"/>
+    <line x1="320" y1="192" x2="192" y2="320"/>
+  </g>
+</svg>
