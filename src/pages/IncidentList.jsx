@@ -14,6 +14,7 @@ import { getIncidents } from "../platformStore";
 export default function IncidentList() {
     const navigate = useNavigate();
     const [searchTerm, setSearchTerm] = useState("");
+    const [currentPage, setCurrentPage] = useState(1);
     const [storeTick, setStoreTick] = useState(0);
 
     const incidents = useMemo(() => {
@@ -25,6 +26,10 @@ export default function IncidentList() {
         window.addEventListener("soc_platform_data", onPlatformData);
         return () => window.removeEventListener("soc_platform_data", onPlatformData);
     }, []);
+
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchTerm]);
 
     const filteredIncidents = useMemo(() => {
         if (!searchTerm.trim()) return incidents;
@@ -88,15 +93,21 @@ export default function IncidentList() {
             <header className="incidents-topbar">
                 <div className="incidents-topbar-left">
                     <div className="incidents-logo"><SocLogo /></div>
-                    <nav className="incidents-topnav">
-                        <NavLink to="/dashboard">Dashboard</NavLink>
-                        <NavLink to="/alerts">Alerts</NavLink>
-                        <NavLink to="/incidents" className="active">Incidents</NavLink>
-                        <NavLink to="/intelligence">Intelligence</NavLink>
-                        <NavLink to="/cases">Cases</NavLink>
-                        <NavLink to="/audit">Audit &amp; Metrics</NavLink>
-                        <NavLink to="/settings">Settings</NavLink>
-                    </nav>
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                        const roleType = (user.roleType || "analyst").toLowerCase();
+                        return (
+                            <nav className="incidents-topnav">
+                                <NavLink to="/dashboard">Dashboard</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                                <NavLink to="/incidents" className="active">Incidents</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence">Intelligence</NavLink>}
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                                {roleType === "admin" && <NavLink to="/audit">Audit &amp; Metrics</NavLink>}
+                                {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                            </nav>
+                        );
+                    })()}
                 </div>
                 <div className="incidents-topbar-right">
                     <div className="incidents-search">
@@ -167,7 +178,7 @@ export default function IncidentList() {
                                         <div className="incidents-col-score">Score</div>
                                         <div className="incidents-col-status">Status</div>
                                     </div>
-                                    {sortedIncidents.map((incident) => {
+                                    {sortedIncidents.slice((currentPage - 1) * 10, currentPage * 10).map((incident) => {
                                         const sourceCount = getSourceCount(incident);
                                         const stages = getStages(incident);
                                         const correlationScore = Number.isFinite(Number(incident?.correlationScore))
@@ -224,6 +235,56 @@ export default function IncidentList() {
                                         );
                                     })}
                                 </div>
+                                {sortedIncidents.length > 10 && (
+                                    <div className="incidents-pagination" style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        padding: "16px 24px",
+                                        borderTop: "1px solid rgba(255, 255, 255, 0.05)",
+                                        background: "rgba(255, 255, 255, 0.01)",
+                                        fontSize: "13px",
+                                        color: "#94a3b8"
+                                    }}>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                                            disabled={currentPage === 1}
+                                            style={{
+                                                background: "rgba(59, 130, 246, 0.1)",
+                                                border: "1px solid rgba(59, 130, 246, 0.2)",
+                                                borderRadius: "4px",
+                                                color: currentPage === 1 ? "rgba(255, 255, 255, 0.15)" : "#3b82f6",
+                                                cursor: currentPage === 1 ? "not-allowed" : "pointer",
+                                                padding: "6px 12px",
+                                                fontWeight: "600",
+                                                transition: "all 0.2s"
+                                            }}
+                                        >
+                                            &larr; Previous
+                                        </button>
+                                        <span style={{ fontWeight: "500", fontFamily: "monospace" }}>
+                                            Page {currentPage} of {Math.ceil(sortedIncidents.length / 10)}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentPage(p => Math.min(Math.ceil(sortedIncidents.length / 10), p + 1))}
+                                            disabled={currentPage === Math.ceil(sortedIncidents.length / 10)}
+                                            style={{
+                                                background: "rgba(59, 130, 246, 0.1)",
+                                                border: "1px solid rgba(59, 130, 246, 0.2)",
+                                                borderRadius: "4px",
+                                                color: currentPage === Math.ceil(sortedIncidents.length / 10) ? "rgba(255, 255, 255, 0.15)" : "#3b82f6",
+                                                cursor: currentPage === Math.ceil(sortedIncidents.length / 10) ? "not-allowed" : "pointer",
+                                                padding: "6px 12px",
+                                                fontWeight: "600",
+                                                transition: "all 0.2s"
+                                            }}
+                                        >
+                                            Next &rarr;
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

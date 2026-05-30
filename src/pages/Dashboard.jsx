@@ -4,7 +4,8 @@ import { HeaderMenuAvatar, HeaderNotificationBell, HeaderSettingsNav } from "../
 import { SocLogo } from "../components/SocLogo";
 import { logoutSession } from "../session";
 import { buildTrendData, getAlerts, getSeverityCounts, getTelemetry } from "../store/socStore";
-import { calculateMTTR, getCases, getIncidents } from "../platformStore";
+import { calculateMTTR, getCases, getIncidents, syncWithBackend } from "../platformStore";
+import { BASE_URL } from "../api/client";
 import {
     RefreshCw, Download, Bell, BellRing, Home,
     Timer, Settings, Database, Shield, Router, ClipboardList, Clock,
@@ -322,13 +323,47 @@ export default function Dashboard() {
     }, []);
 
     useEffect(() => {
+        const token = localStorage.getItem("isAuthToken");
+        if (!token) return;
+
+        const cleanBase = BASE_URL.endsWith("/") ? BASE_URL : `${BASE_URL}/`;
+        const sseUrl = `${cleanBase}v1/telemetry/stream?token=${token}`;
+        
+        console.log("🔌 SentinelX: Connecting to live telemetry stream...", sseUrl);
+        const eventSource = new EventSource(sseUrl);
+
+        eventSource.onmessage = (event) => {
+            try {
+                const alert = JSON.parse(event.data);
+                console.log("🚨 SentinelX: Live Telemetry Event Received:", alert);
+                
+                // Trigger backend data sync to pull the newly created alerts/incidents/cases
+                syncWithBackend();
+            } catch (err) {
+                console.error("Error parsing telemetry stream message:", err);
+            }
+        };
+
+        eventSource.onerror = (err) => {
+            console.error("SentinelX: Telemetry stream connection error or closed:", err);
+            eventSource.close();
+        };
+
+        return () => {
+            console.log("🔌 SentinelX: Closing live telemetry stream");
+            eventSource.close();
+        };
+    }, []);
+
+    useEffect(() => {
+        // Slow fallback poll to keep everything in absolute synchronization
         const id = setInterval(() => {
-            reloadData();
+            syncWithBackend();
             setLastSync(new Date());
             setLiveTick((n) => n + 1);
-        }, 6000);
+        }, 15000);
         return () => clearInterval(id);
-    }, [reloadData]);
+    }, []);
 
     const dashDerived = useMemo(() => {
         try {
@@ -582,15 +617,21 @@ export default function Dashboard() {
             <header className="dash-topbar soc-topbar">
                 <div style={{ display: "flex", alignItems: "center", gap: 16, flex: 1, minWidth: 0, flexWrap: "wrap" }}>
                     <SocLogo />
-                <nav className="dash-topnav">
-                    <NavLink to="/dashboard" className={({ isActive }) => (isActive ? "active" : "")}>Dashboard</NavLink>
-                    <NavLink to="/alerts">Alerts</NavLink>
-                    <NavLink to="/incidents">Incidents</NavLink>
-                    <NavLink to="/intelligence">Intelligence</NavLink>
-                    <NavLink to="/cases">Cases</NavLink>
-                    <NavLink to="/audit">Audit & Metrics</NavLink>
-                    <NavLink to="/settings">Settings</NavLink>
-                </nav>
+                {(() => {
+                    const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                    const roleType = (user.roleType || "analyst").toLowerCase();
+                    return (
+                        <nav className="dash-topnav">
+                            <NavLink to="/dashboard" className={({ isActive }) => (isActive ? "active" : "")}>Dashboard</NavLink>
+                            {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                            <NavLink to="/incidents">Incidents</NavLink>
+                            {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence">Intelligence</NavLink>}
+                            {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                            {roleType === "admin" && <NavLink to="/audit">Audit & Metrics</NavLink>}
+                            {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                        </nav>
+                    );
+                })()}
                 </div>
 
                 <div className="dash-topbar-right soc-topbar-actions">

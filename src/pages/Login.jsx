@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Mail, Lock, Eye, EyeOff, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { ensureSocUsers, readSocUsers, tryLogin, writeSocUsers, LS_AUTH, LS_USER, LS_ROLE } from "../session";
-import { pushAudit, pushNotification } from "../platformStore";
+import Swal from "sweetalert2";
+import { LS_AUTH, LS_USER, LS_ROLE } from "../session";
+import { loginUser, verifyUserOtp } from "../api/authService";
+import { pushNotification } from "../platformStore";
 import { BRAND } from "../brand";
 import { SocLogo } from "../components/SocLogo";
 import { ensureSocProfileDefaults } from "../socProfile";
-import { mockUsers } from "../data/mockUsers";
 import { addAuditLog, AUDIT_ACTIONS, AUDIT_SEVERITY } from "../services/auditLogger";
 import "../styles/Login.css";
 import "../styles/socLayout.css";
@@ -46,7 +47,6 @@ export default function Login() {
     const navigate = useNavigate();
 
     useEffect(() => {
-        ensureSocUsers();
         ensureSocProfileDefaults();
 
         // Auto-redirect if already logged in
@@ -54,9 +54,9 @@ export default function Login() {
             navigate("/dashboard", { replace: true });
         }
 
-        // Check if MFA is pending
-        const pendingUser = localStorage.getItem(LS_PENDING_USER);
-        if (pendingUser) {
+        // Check if MFA is pending via session storage
+        const pendingSession = sessionStorage.getItem("pending_session_id");
+        if (pendingSession) {
             setMfaStep(true);
         }
     }, [navigate]);
@@ -80,79 +80,59 @@ export default function Login() {
 
         if (Object.keys(newErrors).length > 0) return;
 
+        // Clean slate to prevent stale state pollution
+        localStorage.removeItem("isAuthToken");
+        localStorage.removeItem("isAuth");
+        localStorage.removeItem("currentUser");
+        localStorage.removeItem("currentRole");
+        localStorage.removeItem("soc_user");
+        localStorage.removeItem("profile_data");
+        localStorage.removeItem("profile_avatar");
+
         setBusy(true);
         try {
-            await new Promise((r) => { window.setTimeout(r, 220); });
+            // Call real backend API
+            const responseData = await loginUser(email, password);
 
-            // Validate against mock users
-            const matchedUser = mockUsers.find(
-                u => u.email === email && u.password === password
-            );
-
-            if (!matchedUser) {
-                setErrors((prev) => ({ ...prev, form: "Invalid email or password" }));
-                return;
+            // Save the session ID returned by backend
+            sessionStorage.setItem("pending_session_id", responseData.session_id);
+            sessionStorage.setItem(LS_OTP_CREATED_AT, String(Date.now()));
+            
+            // In dev mode, the backend returns the OTP code in the response
+            if (responseData.otp) {
+                console.log(`🔐 MFA OTP for ${email}: ${responseData.otp}`);
+                pushNotification(`[DEV] MFA OTP for ${email}: ${responseData.otp}`, { category: "security" });
+                Swal.fire({
+                    title: 'MFA OTP (Dev Mode)',
+                    html: `Your verification code is: <strong style="font-size: 20px; color: #2badee; display: block; margin-top: 10px;">${responseData.otp}</strong>`,
+                    icon: 'info',
+                    background: '#121f28',
+                    color: '#fff',
+                    confirmButtonColor: '#2badee'
+                });
+            } else {
+                pushNotification(`MFA verification code sent to ${email}`, { category: "security" });
             }
-
-            // Generate OTP for MFA
-            const otp = Math.floor(100000 + Math.random() * 900000);
-            try {
-                sessionStorage.setItem(LS_PENDING_OTP, String(otp));
-                sessionStorage.setItem(LS_OTP_CREATED_AT, String(Date.now()));
-                localStorage.setItem(LS_PENDING_USER, JSON.stringify({
-                    id: String(matchedUser.id),
-                    name: matchedUser.name,
-                    email: matchedUser.email,
-                    role: matchedUser.role
-                }));
-            } catch {
-                /* ignore */
-            }
-
-            // Show OTP in console for demo (in production, would be sent via email/SMS)
-            console.log(`🔐 MFA OTP for ${matchedUser.email}: ${otp}`);
-            pushNotification(`MFA OTP sent to ${matchedUser.email}`, { category: "security" });
 
             setMfaStep(true);
             setOtpInput("");
             setMfaError("");
+        } catch (error) {
+            setErrors((prev) => ({ ...prev, form: error.message || "Invalid email or password" }));
         } finally {
             setBusy(false);
         }
     };
 
     const handleForgotPassword = () => {
-        ensureSocUsers();
-        const emailInput = window.prompt("Enter your work email");
-        if (!emailInput) return;
-        const emailLc = emailInput.trim().toLowerCase();
-        const users = readSocUsers() || [];
-        const user = users.find((u) => (u.email || "").trim().toLowerCase() === emailLc);
-        if (!user) {
-            window.alert("Email not found.");
-            return;
-        }
-        const code = String(Math.floor(100000 + Math.random() * 900000));
-        localStorage.setItem("reset_code", code);
-        localStorage.setItem("reset_email", emailLc);
-        window.alert(`Reset code sent to ${emailInput} (simulated): ${code}`);
-        const enteredCode = window.prompt("Enter the 6-digit reset code");
-        if (!enteredCode) return;
-        const newPassword = window.prompt("Enter your new password");
-        if (!newPassword) return;
-        const storedCode = localStorage.getItem("reset_code");
-        const storedEmail = localStorage.getItem("reset_email");
-        if (enteredCode.trim() !== storedCode || storedEmail !== emailLc) {
-            window.alert("Invalid reset code.");
-            return;
-        }
-        const updated = users.map((u) => (u.id === user.id ? { ...u, password: newPassword } : u));
-        writeSocUsers(updated);
-        localStorage.removeItem("reset_code");
-        localStorage.removeItem("reset_email");
-        pushAudit({ action: "password_reset", entityType: "user", entityId: emailLc, message: "Password reset (simulated)" });
-        pushNotification(`Password reset for ${emailLc}`);
-        window.alert("Password updated successfully.");
+        Swal.fire({
+            title: 'Password Recovery',
+            text: 'Password recovery requested. Please contact your SOC Administrator to reset your credentials.',
+            icon: 'info',
+            background: '#121f28',
+            color: '#fff',
+            confirmButtonColor: '#2badee'
+        });
     };
 
     const handleMfaVerify = async () => {
@@ -163,110 +143,96 @@ export default function Login() {
 
         setBusy(true);
         try {
-            await new Promise((r) => { window.setTimeout(r, 220); });
-
-            // Check OTP expiry
-            const createdAt = parseInt(sessionStorage.getItem(LS_OTP_CREATED_AT) || "0", 10);
-            if (Date.now() - createdAt > OTP_EXPIRY_MS) {
-                setMfaError("OTP expired. Please login again.");
-                sessionStorage.removeItem(LS_PENDING_OTP);
-                sessionStorage.removeItem(LS_OTP_CREATED_AT);
-                localStorage.removeItem(LS_PENDING_USER);
-                setMfaStep(false);
-                setOtpInput("");
-                addAuditLog({
-                    action: AUDIT_ACTIONS.MFA_FAILURE,
-                    severity: AUDIT_SEVERITY.SECURITY,
-                    message: "MFA verification failed - OTP expired",
-                    entity: "authentication"
-                });
-                return;
-            }
-
-            // Verify OTP
-            const storedOtp = sessionStorage.getItem(LS_PENDING_OTP);
-            if (otpInput.trim() !== storedOtp) {
-                setMfaError("Invalid OTP. Please try again.");
-                addAuditLog({
-                    action: AUDIT_ACTIONS.MFA_FAILURE,
-                    severity: AUDIT_SEVERITY.SECURITY,
-                    message: "MFA verification failed - Invalid OTP",
-                    entity: "authentication"
-                });
-                return;
-            }
-
-            // OTP verified - complete login
-            const pendingUserStr = localStorage.getItem(LS_PENDING_USER);
-            if (!pendingUserStr) {
+            const sessionId = sessionStorage.getItem("pending_session_id");
+            if (!sessionId) {
                 setMfaError("Session expired. Please login again.");
+                setMfaStep(false);
                 return;
             }
 
-            const pendingUser = JSON.parse(pendingUserStr);
+            // Verify with real backend
+            const responseData = await verifyUserOtp(email, otpInput.trim(), sessionId);
 
-            // Map role to roleType for compatibility
-            const roleTypeMap = {
-                "Administrator": "admin",
-                "SOC Analyst": "analyst",
-                "Viewer": "viewer"
-            };
+            // Map backend role to frontend roleType safely handling objects
+            let rawRoleName = responseData.user?.role?.name || responseData.user?.role?.role || "";
+            if (rawRoleName && typeof rawRoleName === "object") {
+                rawRoleName = rawRoleName.en || rawRoleName.ar || "";
+            }
+            const roleStr = String(rawRoleName || "").toLowerCase();
+            const roleType = roleStr.includes("admin") 
+                ? "admin" 
+                : (roleStr.includes("viewer") ? "viewer" : "analyst");
 
-            // Store user info with correct keys
-            try {
-                localStorage.setItem(
-                    LS_USER,
-                    JSON.stringify({
-                        id: String(pendingUser.id),
-                        name: pendingUser.name,
-                        email: pendingUser.email,
-                        roleType: roleTypeMap[pendingUser.role] || "analyst"
-                    })
-                );
-                localStorage.setItem(LS_AUTH, "true");
-                localStorage.setItem(LS_ROLE, roleTypeMap[pendingUser.role] || "analyst");
+            // Store token and user information
+            localStorage.setItem(
+                LS_USER,
+                JSON.stringify({
+                    id: String(responseData.user.id),
+                    name: responseData.user.name,
+                    email: responseData.user.email,
+                    roleType: roleType
+                })
+            );
+            localStorage.setItem(LS_AUTH, "true");
+            localStorage.setItem(LS_ROLE, roleType);
 
-                if (rememberMe) {
-                    localStorage.setItem(LS_REMEMBER, "1");
-                    localStorage.setItem(LS_LAST_EMAIL, pendingUser.email.trim().toLowerCase());
-                } else {
-                    localStorage.removeItem(LS_REMEMBER);
-                    localStorage.removeItem(LS_LAST_EMAIL);
-                }
-            } catch {
-                /* ignore */
+            // Set the display profile to avoid the default fallback override
+            const displayRoleLabel = roleType === "admin" ? "SOC Administrator" : roleType === "viewer" ? "SOC Viewer" : "SOC Analyst";
+            localStorage.setItem(
+                "soc_user",
+                JSON.stringify({
+                    name: responseData.user.name,
+                    role: rawRoleName || displayRoleLabel,
+                    avatar: "",
+                    email: responseData.user.email,
+                })
+            );
+
+            if (rememberMe) {
+                localStorage.setItem(LS_REMEMBER, "1");
+                localStorage.setItem(LS_LAST_EMAIL, email.trim().toLowerCase());
+            } else {
+                localStorage.removeItem(LS_REMEMBER);
+                localStorage.removeItem(LS_LAST_EMAIL);
             }
 
             // Clean up MFA session
-            sessionStorage.removeItem(LS_PENDING_OTP);
+            sessionStorage.removeItem("pending_session_id");
             sessionStorage.removeItem(LS_OTP_CREATED_AT);
-            localStorage.removeItem(LS_PENDING_USER);
 
             addAuditLog({
                 action: AUDIT_ACTIONS.MFA_SUCCESS,
                 severity: AUDIT_SEVERITY.INFO,
-                user: pendingUser.name,
-                message: `MFA verification successful - Role: ${pendingUser.role}`,
+                user: responseData.user.name,
+                message: `MFA verification successful - Role: ${rawRoleName || displayRoleLabel}`,
                 entity: "authentication"
             });
-            pushNotification(`${pendingUser.name} logged in with MFA`);
+            pushNotification(`${responseData.user.name} logged in with MFA`);
             window.dispatchEvent(new Event("soc_system_refresh"));
             navigate("/dashboard", { replace: true });
+        } catch (error) {
+            setMfaError(error.message || "Invalid OTP. Please try again.");
+            addAuditLog({
+                action: AUDIT_ACTIONS.MFA_FAILURE,
+                severity: AUDIT_SEVERITY.SECURITY,
+                message: `MFA verification failed - ${error.message}`,
+                entity: "authentication"
+            });
         } finally {
             setBusy(false);
         }
     };
 
     const handleMfaCancel = () => {
-        sessionStorage.removeItem(LS_PENDING_OTP);
+        sessionStorage.removeItem("pending_session_id");
         sessionStorage.removeItem(LS_OTP_CREATED_AT);
-        localStorage.removeItem(LS_PENDING_USER);
         setMfaStep(false);
         setOtpInput("");
         setMfaError("");
         setEmail("");
         setPassword("");
     };
+
 
     return (
         <div className="app">

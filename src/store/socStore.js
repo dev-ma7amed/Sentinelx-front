@@ -34,19 +34,48 @@ function normalizeAlert(a) {
       : a.date && a.time
       ? `${a.date}T${a.time}Z`
       : new Date().toISOString();
-  const mitre = detectMitre(a);
+  const mitre = a.mitre || detectMitre(a);
   const srcKey = a.srcIP || a?.data?.srcip || "unknown";
   const correlationId = a.correlationId || `corr-${String(srcKey).replace(/\./g, "-")}`;
+  const incidentId = a.incidentId != null ? a.incidentId : a.incident_id != null ? a.incident_id : null;
+  let baseStatus = a.status || "new";
+  if (incidentId) {
+    let localIncidents = [];
+    let localCases = [];
+    if (typeof window !== "undefined") {
+      try {
+        const rawInc = localStorage.getItem("soc_incidents");
+        localIncidents = rawInc ? JSON.parse(rawInc) : [];
+        const rawCas = localStorage.getItem("soc_cases");
+        localCases = rawCas ? JSON.parse(rawCas) : [];
+      } catch (e) {}
+    }
+    const inc = Array.isArray(localIncidents) ? localIncidents.find(i => String(i.id) === String(incidentId)) : null;
+    const linkedCase = Array.isArray(localCases) ? localCases.find(c => String(c.incidentId) === String(incidentId) || String(c.incident_id) === String(incidentId)) : null;
+    
+    const hasCase = linkedCase || (inc && inc.case_id);
+    
+    if (hasCase) {
+      const isCaseClosed = linkedCase && String(linkedCase.status).toLowerCase() === "closed";
+      const isIncidentClosed = inc && String(inc.status).toLowerCase() === "closed";
+      
+      if (isCaseClosed || isIncidentClosed) {
+        baseStatus = "resolved";
+      } else {
+        baseStatus = "escalated";
+      }
+    }
+  }
   return {
     ...a,
     severity,
     source: a.source || "Suricata",
-    status: String(a.status || "new").toLowerCase().trim(),
+    status: baseStatus.toLowerCase().trim(),
     srcIP: srcKey,
     createdAt,
     mitre,
     correlationId,
-    incidentId: a.incidentId != null ? a.incidentId : null,
+    incidentId,
   };
 }
 

@@ -1,5 +1,25 @@
 import { ALERTS_PLAIN } from "./mocks/alertsPlain.jsx";
 import { getCurrentUser } from "./session";
+import { 
+    getAlertsList, 
+    getIncidentsList, 
+    getCasesList, 
+    assignAlert as apiAssignAlert, 
+    investigateAlert as apiInvestigateAlert,
+    escalateAlert as apiEscalateAlert,
+    classifyIncident as apiClassifyIncident,
+    createCase as apiCreateCase,
+    addCaseNote as apiAddCaseNote,
+    escalateCase as apiEscalateCase,
+    closeCase as apiCloseCase,
+    assignCase as apiAssignCase,
+    getBackendAuditLogs,
+    getBackendIntegrations,
+    getBackendNotifications,
+    getDetectionRules,
+    updateBackendIntegration,
+    getMitreMapping
+} from "./api/socService";
 
 const LS_ALERTS = "soc_alerts";
 const LS_INCIDENTS = "soc_incidents";
@@ -10,7 +30,7 @@ const LS_RULES = "soc_rules";
 const LS_INTEGRATIONS = "soc_integrations";
 const LS_CASES = "soc_cases";
 const LS_STORE_VERSION = "soc_store_version";
-const CURRENT_STORE_VERSION = 99; // Force reset on every load
+const CURRENT_STORE_VERSION = 100; // Force reset on every load
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUTHORITATIVE STATE OVERRIDE - Force fresh data on app start
@@ -66,6 +86,26 @@ const RULES_SEED = [
 ];
 
 const SEVERITY_ORDER = ["low", "medium", "high", "critical"];
+
+let backendRulesCache = RULES_SEED.map(normalizeSeedRule);
+let backendIntegrationsCache = {
+    wazuh: true,
+    sysmon: true,
+    suricata: true,
+    ml: true,
+    network_ml: true,
+    virustotal: false,
+    abuseipdb: false,
+};
+let backendNotificationsCache = [];
+let backendAuditLogCache = [];
+
+function normalizeSeedRule(rule) {
+    return {
+        ...rule,
+        active: true,
+    };
+}
 
 function readJson(key, fallback) {
     try {
@@ -291,7 +331,7 @@ export function inferAlertActions(alert) {
         return link ? ["view-case"] : [];
     }
     if (st === "new") {
-        const row = ["assign", "escalate", "investigate"];
+        const row = ["escalate", "investigate"];
         if (link) row.push("view-case");
         return row;
     }
@@ -302,7 +342,7 @@ export function inferAlertActions(alert) {
     }
     const row = [];
     if (link) row.push("view-case");
-    return row.length ? row : ["assign", "escalate", "investigate"];
+    return row.length ? row : ["escalate", "investigate"];
 }
 
 function parseTimeAgo(value) {
@@ -537,7 +577,14 @@ function calculateIncidentCorrelationScore(severity, alerts, sources, stageCount
 }
 
 function normalizeRule(rule) {
-    const pattern = rule?.match;
+    const backendMatch = rule?.field_match
+        ? String(rule.field_match)
+            .split(/\s+AND\s+/i)
+            .map((part) => part.match(/CONTAINS\s+["']?(.+?)["']?$/i)?.[1])
+            .filter(Boolean)
+            .join("|")
+        : "";
+    const pattern = rule?.match || backendMatch;
     const regex = pattern instanceof RegExp
         ? new RegExp(pattern.source, pattern.flags.replaceAll("g", ""))
         : new RegExp(String(pattern || ".^"), "i");
@@ -545,9 +592,9 @@ function normalizeRule(rule) {
         ...rule,
         match: regex,
         source: rule?.source ? canonicalSource(rule.source) : "",
-        severity: normalizeSeverity(rule?.severity),
-        threshold: rule?.threshold ?? null,
-        window: rule?.window ?? rule?.windowMs ?? null,
+        severity: normalizeSeverity(rule?.severity || rule?.severity_override),
+        threshold: rule?.threshold ?? rule?.threshold_count ?? null,
+        window: rule?.window ?? rule?.windowMs ?? ((rule?.time_window_seconds || 0) * 1000) ?? null,
     };
 }
 
@@ -579,63 +626,56 @@ function thresholdSatisfied(rule, alert, alerts) {
     return /multiple|repeated|burst|excessive|many/i.test(alertText(a));
 }
 
-export function getIntegrations() {
+function normalizeIntegrationMap(list) {
     const base = {
         wazuh: true,
         sysmon: true,
         suricata: true,
         ml: true,
-        virustotal: true,
+        network_ml: true,
+        virustotal: false,
+        abuseipdb: false,
     };
-    const seeded = readJson(LS_INTEGRATIONS, null);
-    if (!seeded || typeof seeded !== "object") {
-        writeJson(LS_INTEGRATIONS, base);
-        return base;
+
+    if (Array.isArray(list)) {
+        return list.reduce((acc, item) => {
+            const key = item?.name === "network_ml" ? "ml" : item?.name;
+            if (key) acc[key] = !!item.enabled;
+            if (item?.name === "network_ml") acc.network_ml = !!item.enabled;
+            return acc;
+        }, { ...base });
     }
-    if (typeof seeded.wazuh === "boolean" || typeof seeded.sysmon === "boolean" || typeof seeded.suricata === "boolean" || typeof seeded.ml === "boolean" || typeof seeded.virustotal === "boolean") {
-        const next = {
-            ...base,
-            ...Object.fromEntries(Object.entries(seeded).map(([key, value]) => [key, !!value])),
-        };
-        writeJson(LS_INTEGRATIONS, next);
-        return next;
-    }
-    const legacyMap = {
-        Wazuh: "wazuh",
-        Sysmon: "sysmon",
-        Suricata: "suricata",
-        "Network ML": "ml",
-        VirusTotal: "virustotal",
+
+    return {
+        ...base,
+        ...Object.fromEntries(Object.entries(list || {}).map(([key, value]) => [key, !!value])),
     };
-    const next = { ...base };
-    Object.entries(legacyMap).forEach(([legacyKey, newKey]) => {
-        const val = seeded?.[legacyKey];
-        if (val && typeof val === "object") {
-            next[newKey] = (val.status || "connected") === "connected";
-        } else if (typeof val === "boolean") {
-            next[newKey] = val;
-        }
-    });
-    writeJson(LS_INTEGRATIONS, next);
-    return next;
+}
+
+export function getIntegrations() {
+    return { ...backendIntegrationsCache };
 }
 
 export function setIntegrations(next) {
-    const base = {
-        wazuh: true,
-        sysmon: true,
-        suricata: true,
-        ml: true,
-        virustotal: true,
-    };
-    const normalized = {
-        ...base,
-        ...Object.fromEntries(Object.entries(next || {}).map(([key, value]) => [key, !!value])),
-    };
-    writeJson(LS_INTEGRATIONS, normalized);
+    const previous = { ...backendIntegrationsCache };
+    const normalized = normalizeIntegrationMap(next);
+    backendIntegrationsCache = normalized;
+
     if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("soc_integrations_update"));
     }
+
+    Object.entries(normalized).forEach(([key, enabled]) => {
+        if (previous[key] === enabled) return;
+        const apiName = key === "ml" ? "network_ml" : key;
+        updateBackendIntegration(apiName, { enabled }).catch((error) => {
+            console.error("Failed to update integration:", error);
+            backendIntegrationsCache = previous;
+            if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("soc_integrations_update"));
+            }
+        });
+    });
 }
 
 function inferNotificationCategory(text, meta = {}) {
@@ -740,6 +780,34 @@ export function normalizeAlert(alert) {
         `${canonicalSource(rest.source, rest)}-${rest.data?.srcip || rest.srcIP || "unknown"}-${resolveCreatedAt(rest)}`;
     const id = String(baseId).replace(/\s+/g, "-");
 
+    const incidentId = rest.incidentId || rest.incident_id || null;
+    let baseStatus = rest.status || "new";
+    if (incidentId) {
+        let localIncidents = [];
+        let localCases = [];
+        try {
+            const rawInc = localStorage.getItem("soc_incidents");
+            localIncidents = rawInc ? JSON.parse(rawInc) : [];
+            const rawCas = localStorage.getItem("soc_cases");
+            localCases = rawCas ? JSON.parse(rawCas) : [];
+        } catch (e) {}
+        const inc = Array.isArray(localIncidents) ? localIncidents.find(i => String(i.id) === String(incidentId)) : null;
+        const linkedCase = Array.isArray(localCases) ? localCases.find(c => String(c.incidentId) === String(incidentId) || String(c.incident_id) === String(incidentId)) : null;
+        
+        const hasCase = linkedCase || (inc && inc.case_id);
+        
+        if (hasCase) {
+            const isCaseClosed = linkedCase && String(linkedCase.status).toLowerCase() === "closed";
+            const isIncidentClosed = inc && String(inc.status).toLowerCase() === "closed";
+            
+            if (isCaseClosed || isIncidentClosed) {
+                baseStatus = "resolved";
+            } else {
+                baseStatus = "escalated";
+            }
+        }
+    }
+
     const normalized = {
         ...rest,
         id,
@@ -757,13 +825,14 @@ export function normalizeAlert(alert) {
         type,
         desc,
         sub,
-        status: normalizeStatus(rest.status),
+        status: normalizeStatus(baseStatus),
+        incidentId,
         actions: inferAlertActions({
             ...rest,
             id,
             source,
-            status: normalizeStatus(rest.status),
-            incidentId: rest.incidentId,
+            status: normalizeStatus(baseStatus),
+            incidentId,
         }),
         ruleMatches: uniq(safeArray(rest.ruleMatches)),
         mitre: uniq([
@@ -782,9 +851,7 @@ export function normalizeAlert(alert) {
 }
 
 export function getRules() {
-    const list = readJson(LS_RULES, null);
-    if (Array.isArray(list) && list.length) return list.map(normalizeRule);
-    return RULES_SEED.map(normalizeRule);
+    return (Array.isArray(backendRulesCache) && backendRulesCache.length ? backendRulesCache : RULES_SEED).map(normalizeRule);
 }
 
 export function applyRulesToAlert(alert, allAlerts = null) {
@@ -860,11 +927,15 @@ function readRawAlerts() {
     const seed = ALERTS_PLAIN.map((a) => ({ ...a }));
     const raw = readJson(LS_ALERTS, null);
     if (!Array.isArray(raw) || raw.length === 0) return seed;
-    const byId = new Map(raw.filter(Boolean).map((a) => [String(a.id), a]));
-    return seed.map((s) => {
-        const row = byId.get(String(s.id));
-        return row ? { ...s, ...row } : { ...s };
+    
+    const mergedMap = new Map();
+    seed.forEach(s => mergedMap.set(String(s.id), s));
+    raw.filter(Boolean).forEach(r => {
+        const existing = mergedMap.get(String(r.id));
+        mergedMap.set(String(r.id), existing ? { ...existing, ...r } : r);
     });
+    
+    return Array.from(mergedMap.values());
 }
 
 function writeRawAlerts(list) {
@@ -892,6 +963,10 @@ export function updateStoredAlert(alertId, updater) {
 }
 
 export function assignAlert(alertId, assigneeName) {
+    apiAssignAlert(alertId, assigneeName)
+        .then(() => syncWithBackend())
+        .catch((err) => console.error("Real assignAlert failed:", err));
+
     return updateStoredAlert(alertId, (a) => {
         const out = { ...a, assignedTo: assigneeName };
         const st = String(a.status || "").toLowerCase();
@@ -901,6 +976,10 @@ export function assignAlert(alertId, assigneeName) {
 }
 
 export function investigateAlert(alertId) {
+    apiInvestigateAlert(alertId)
+        .then(() => syncWithBackend())
+        .catch((err) => console.error("Real investigateAlert failed:", err));
+
     const raw = readRawAlerts();
     const t = raw.find((r) => r?.id === alertId);
     if (!t) return { updated: 0 };
@@ -923,6 +1002,10 @@ export function investigateAlert(alertId) {
 
 /** Manual escalation only: mark alert escalated, ensure incident exists, link incidentId on correlated alerts. */
 export function escalateAlert(alertId) {
+    apiEscalateAlert(alertId)
+        .then(() => syncWithBackend())
+        .catch((err) => console.error("Real escalateAlert failed:", err));
+
     const raw = readRawAlerts();
     const t = raw.find((r) => r?.id === alertId);
     if (!t) return null;
@@ -1299,6 +1382,11 @@ export function executeUnifiedAction(action, payload = {}) {
         switch (action) {
             case "classify_incident": {
                 const { incidentId, classification, comment } = payload;
+                
+                apiClassifyIncident(incidentId, classification, "closed")
+                    .then(() => syncWithBackend())
+                    .catch((err) => console.error("Real classifyIncident failed:", err));
+
                 const incidents = getIncidents();
                 const incident = incidents.find((i) => i.id === incidentId);
                 if (!incident) return null;
@@ -1364,6 +1452,11 @@ export function executeUnifiedAction(action, payload = {}) {
 
             case "close_case": {
                 const { caseId, classification, comment } = payload;
+
+                apiCloseCase(caseId, { classification, comment })
+                    .then(() => syncWithBackend())
+                    .catch((err) => console.error("Real closeCase failed:", err));
+
                 const cases = getCases();
                 const caseItem = cases.find((c) => c.id === caseId);
                 if (!caseItem) return null;
@@ -1395,6 +1488,17 @@ export function executeUnifiedAction(action, payload = {}) {
                             resolution: classification === "false_positive" ? "false_positive" : classification === "duplicate" ? "duplicate" : "resolved",
                         };
                         upsertIncident(updatedIncident);
+
+                        // Update related alerts
+                        const alertIds = incident.alertIds || [];
+                        alertIds.forEach((alertId) => {
+                            updateStoredAlert(alertId, (current) => ({
+                                ...current,
+                                status: "resolved",
+                                falsePositive: classification === "false_positive",
+                                incidentId: incident.id,
+                            }));
+                        });
                     }
                 }
 
@@ -1417,34 +1521,75 @@ export function executeUnifiedAction(action, payload = {}) {
 
             case "assign_case": {
                 const { caseId, assignedTo } = payload;
+
+                apiAssignCase(caseId, assignedTo)
+                    .then(() => syncWithBackend())
+                    .catch((err) => console.error("Real assignCase failed:", err));
+
                 const cases = getCases();
                 const caseItem = cases.find((c) => c.id === caseId);
                 if (!caseItem) return null;
 
+                const normalizedAssignedTo = String(assignedTo || "").replace(/\s*\(You\)\s*$/i, "").trim();
+
                 const updatedCase = {
                     ...caseItem,
-                    assignedTo,
+                    assignedTo: normalizedAssignedTo,
                     updatedAt: now,
                 };
                 upsertCase(updatedCase);
+
+                if (caseItem.incidentId) {
+                    updateIncidentStatusOnAssign(caseItem.incidentId, normalizedAssignedTo);
+
+                    // Update corresponding incident owner/assignedTo directly in storage
+                    const incidents = getIncidents();
+                    const updatedIncidents = incidents.map((i) => {
+                        if (String(i.id) === String(caseItem.incidentId)) {
+                            return {
+                                ...i,
+                                owner: normalizedAssignedTo,
+                                assignedTo: normalizedAssignedTo,
+                            };
+                        }
+                        return i;
+                    });
+                    setIncidents(updatedIncidents);
+
+                    // Update all linked alerts
+                    const incident = incidents.find((i) => String(i.id) === String(caseItem.incidentId));
+                    if (incident && Array.isArray(incident.alertIds)) {
+                        incident.alertIds.forEach((alertId) => {
+                            updateStoredAlert(alertId, (current) => ({
+                                ...current,
+                                assignedTo: normalizedAssignedTo,
+                            }));
+                        });
+                    }
+                }
 
                 pushAudit({
                     action: "assign_case",
                     entityType: "case",
                     entityId: caseId,
-                    assignedTo,
+                    assignedTo: normalizedAssignedTo,
                     analyst,
-                    message: `Case assigned to ${assignedTo}`,
+                    message: `Case assigned to ${normalizedAssignedTo}`,
                     timestamp: now,
                 });
 
-                pushNotification(`Case ${caseId} assigned to ${assignedTo}`, { category: "case" });
+                pushNotification(`Case ${caseId} assigned to ${normalizedAssignedTo}`, { category: "case" });
                 emitPlatformDataChanged();
                 return updatedCase;
             }
 
             case "escalate_case": {
-                const { caseId, level, reason } = payload;
+                const { caseId, level, assignee, reason } = payload;
+
+                apiEscalateCase(caseId, { level, assignee, reason })
+                    .then(() => syncWithBackend())
+                    .catch((err) => console.error("Real escalateCase failed:", err));
+
                 const cases = getCases();
                 const caseItem = cases.find((c) => c.id === caseId);
                 if (!caseItem) return null;
@@ -1456,6 +1601,7 @@ export function executeUnifiedAction(action, payload = {}) {
                     escalated: true,
                     status: "escalated",
                     pending: true,
+                    assignedTo: assignee || level,
                     updatedAt: now,
                 };
                 upsertCase(updatedCase);
@@ -1604,13 +1750,40 @@ function deriveMitreFromAlerts(alerts) {
     return Array.from(result.values());
 }
 
-export function createCaseFromIncident(incident) {
+export async function createCaseFromIncident(incident) {
     const inc = incident && typeof incident === "object" ? incident : {};
     const incidentId = pickText(inc.id);
     if (!incidentId) return null;
+
     const cases = getCases();
     const exists = cases.find((c) => c.incidentId === incidentId);
     if (exists) return exists;
+
+    const isLive = typeof window !== "undefined" && !!(localStorage.getItem("auth_token") || localStorage.getItem("isAuthToken"));
+
+    if (isLive) {
+        try {
+            console.log("Creating case for incident via API:", incidentId);
+            await apiCreateCase({ incident_id: incidentId });
+            await syncWithBackend();
+            const freshCases = getCases();
+            const freshExists = freshCases.find((c) => c.incidentId === incidentId);
+            if (freshExists) {
+                console.log("Successfully created and synced case from backend:", freshExists.id);
+                return freshExists;
+            }
+            throw new Error("Case created on backend, but could not be located in local synced store.");
+        } catch (err) {
+            console.error("Real apiCreateCase failed under Live Mode:", err);
+            throw err;
+        }
+    }
+
+    try {
+        console.log("Creating case for incident offline/mock:", incidentId);
+    } catch (err) {
+        console.error("apiCreateCase offline logging failed:", err);
+    }
 
     // Build full MITRE structure with details
     let mitreList = [];
@@ -1672,8 +1845,8 @@ export function createCaseFromIncident(incident) {
         classification: "",
         resolution: "",
 
-        assignedTo: analyst,
-        openedBy: analyst,
+        assignedTo: (inc.assignedTo || inc.owner || analyst || "").replace(/\s*\(You\)\s*$/i, "").trim(),
+        openedBy: (analyst || "").replace(/\s*\(You\)\s*$/i, "").trim(),
 
         createdAt: now,
         updatedAt: now,
@@ -1793,14 +1966,12 @@ function getMitreTactic(id) {
 }
 
 export function getAuditLog() {
-    const list = readJson(LS_AUDIT, []);
-    return Array.isArray(list) ? list : [];
+    return Array.isArray(backendAuditLogCache) ? backendAuditLogCache : [];
 }
 
 export function pushAudit(entry) {
     const row = { id: `a-${Date.now()}`, at: new Date().toISOString(), ...entry };
-    const next = [row, ...getAuditLog()];
-    writeJson(LS_AUDIT, next);
+    backendAuditLogCache = [row, ...getAuditLog()];
     if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("soc_audit_update"));
     }
@@ -1883,15 +2054,12 @@ export function getIncidentAuditLogsByIncidentId(incidentId) {
 }
 
 export function getNotifications() {
-    const list = readJson(LS_NOTIFS, null);
-    if (Array.isArray(list)) return list;
-    writeJson(LS_NOTIFS, NOTIF_SEED);
-    return NOTIF_SEED;
+    return Array.isArray(backendNotificationsCache) && backendNotificationsCache.length ? backendNotificationsCache : NOTIF_SEED;
 }
 
 export function setNotifications(list) {
-    writeJson(LS_NOTIFS, list);
-    emitNotifications(list);
+    backendNotificationsCache = Array.isArray(list) ? list : [];
+    emitNotifications(getNotifications());
 }
 
 export function pushNotification(text, meta = {}) {
@@ -1904,7 +2072,7 @@ export function pushNotification(text, meta = {}) {
         category: meta.category || inferNotificationCategory(text, meta),
     };
     const next = [row, ...getNotifications()];
-    writeJson(LS_NOTIFS, next);
+    backendNotificationsCache = next;
     emitNotifications(next);
     return row;
 }
@@ -2265,11 +2433,288 @@ if (typeof window !== "undefined") {
     };
 }
 
+export async function syncWithBackend() {
+    if (typeof window === "undefined") return;
+
+    const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token") || localStorage.getItem("isAuthToken");
+    if (!token) {
+        console.log("🔄 SentinelX: No auth token found. Skipping sync.");
+        return;
+    }
+
+    const curUserRaw = localStorage.getItem("currentUser");
+    let userRole = "analyst";
+    if (curUserRaw) {
+        try {
+            const u = JSON.parse(curUserRaw);
+            userRole = (u.roleType || "analyst").toLowerCase();
+        } catch {}
+    }
+
+    try {
+        console.log(`🔄 SentinelX: Syncing with real Laravel backend (Role: ${userRole})...`);
+        
+        let rawAlerts = [];
+        let rawIncidents = [];
+        let rawCases = [];
+
+        // 1. Fetch alerts: accessible to admin and analyst
+        if (userRole === "admin" || userRole === "analyst") {
+            try {
+                const alertsRes = await getAlertsList({ per_page: 200 });
+                rawAlerts = alertsRes?.data || alertsRes || [];
+            } catch (e) {
+                console.warn("Failed to fetch alerts:", e);
+            }
+        }
+        
+        // 2. Fetch incidents: accessible to all roles
+        try {
+            const incidentsRes = await getIncidentsList({ per_page: 100 });
+            rawIncidents = incidentsRes?.data || incidentsRes || [];
+        } catch (e) {
+            console.warn("Failed to fetch incidents:", e);
+        }
+        
+        // 3. Fetch cases: accessible to admin and analyst
+        if (userRole === "admin" || userRole === "analyst") {
+            try {
+                const casesRes = await getCasesList({ per_page: 100 });
+                rawCases = casesRes?.data || casesRes || [];
+            } catch (e) {
+                console.warn("Failed to fetch cases:", e);
+            }
+        }
+
+        await syncOperationalData(userRole);
+
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // DYNAMIC DEDICATED MITRE CACHE INTEGRATION
+        // ═══════════════════════════════════════════════════════════════════════════════
+        const LS_MITRE_CACHE = "soc_mitre_cache";
+        const mitreCache = readJson(LS_MITRE_CACHE, {});
+        let cacheUpdated = false;
+        
+        const rawAlertsArray = Array.isArray(rawAlerts) ? rawAlerts : [];
+        const newAlertsToFetch = rawAlertsArray.filter(a => a.id && !mitreCache[a.id]);
+        
+        if (newAlertsToFetch.length > 0 && (userRole === "admin" || userRole === "analyst")) {
+            console.log(`🔍 SentinelX: Fetching dynamic MITRE mappings for ${newAlertsToFetch.length} new alerts...`);
+            const mitrePromises = newAlertsToFetch.map(async (a) => {
+                try {
+                    const mRes = await getMitreMapping(a.id);
+                    const mappingData = mRes?.mapping || mRes?.data?.mapping || mRes;
+                    if (mappingData && mappingData.technique_id) {
+                        return { id: a.id, mapping: mappingData };
+                    }
+                } catch (e) {
+                    console.warn(`Could not fetch MITRE mapping for alert ${a.id}:`, e);
+                }
+                return { id: a.id, mapping: null };
+            });
+            
+            const results = await Promise.all(mitrePromises);
+            results.forEach(r => {
+                if (r.mapping) {
+                    mitreCache[r.id] = r.mapping;
+                    cacheUpdated = true;
+                }
+            });
+            
+            if (cacheUpdated) {
+                writeJson(LS_MITRE_CACHE, mitreCache);
+            }
+        }
+
+        // Save raw alerts/incidents/cases to localStorage in format expected by frontend
+        if (rawAlertsArray.length > 0) {
+            const formattedAlerts = rawAlertsArray.map(a => {
+                const dynamicMitre = mitreCache[a.id];
+                return {
+                    ...a,
+                    id: a.id ? String(a.id) : `ALT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    srcIP: a.src_ip || a.srcip || "0.0.0.0",
+                    dstIP: a.dest_ip || a.destip || "0.0.0.0",
+                    desc: a.description || a.desc || "Security Event Alert",
+                    createdAt: a.alerted_at || a.created_at || a.createdAt || new Date().toISOString(),
+                    assignedTo: a.assigned_to || a.assignedTo || null,
+                    incidentId: a.incident_id || a.incidentId || null,
+                    correlationId: a.correlation_id || a.correlationId || null,
+                    status: a.status || "new",
+                    severity: a.severity || "medium",
+                    mitre: dynamicMitre ? {
+                        id: dynamicMitre.technique_id,
+                        name: dynamicMitre.technique,
+                        tactic: dynamicMitre.tactic
+                    } : null
+                };
+            });
+            
+            writeJson(LS_ALERTS, formattedAlerts);
+        }
+
+        if (Array.isArray(rawIncidents) && rawIncidents.length > 0) {
+            const formattedIncidents = rawIncidents.map(i => {
+                const ip = i.dest_ip || i.attacker_ip || i.ip || "0.0.0.0";
+                const localAlerts = readJson(LS_ALERTS, []);
+                const incidentAlerts = localAlerts.filter(a => String(a.incidentId) === String(i.id) || String(a.incident_id) === String(i.id));
+
+                // Inherit MITRE techniques from incident alerts
+                const mitreTechniques = [];
+                const seenMitre = new Set();
+                incidentAlerts.forEach(a => {
+                    if (a.mitre && a.mitre.id && !seenMitre.has(a.mitre.id)) {
+                        seenMitre.add(a.mitre.id);
+                        mitreTechniques.push(a.mitre);
+                    }
+                });
+
+                return {
+                    ...i,
+                    id: String(i.id),
+                    ip: ip,
+                    srcIP: ip,
+                    alerts: incidentAlerts,
+                    alertIds: incidentAlerts.map(a => a.id),
+                    severity: i.severity || "medium",
+                    status: i.status || "open",
+                    correlationScore: Number(i.correlation_score || i.correlationScore || 0),
+                    createdAt: i.created_at || i.createdAt || new Date().toISOString(),
+                    closedAt: i.closed_at || i.closedAt || "",
+                    classification: i.classification || null,
+                    owner: i.assigned_to || i.owner || null,
+                    assignedTo: i.assigned_to || i.assignedTo || null,
+                    caseId: i.case_id || i.caseId || null,
+                    mitre: mitreTechniques.length ? mitreTechniques : (i.mitre || [])
+                };
+            });
+            writeJson(LS_INCIDENTS, formattedIncidents);
+        }
+
+        if (Array.isArray(rawCases) && rawCases.length > 0) {
+            const formattedCases = rawCases.map(c => {
+                const incidentId = c.incident_id || c.incidentId;
+                const localIncidents = readJson(LS_INCIDENTS, []);
+                const inc = localIncidents.find(i => String(i.id) === String(incidentId));
+
+                // Inherit MITRE techniques from case alerts
+                const caseAlerts = inc?.alerts || [];
+                const mitreTechniques = [];
+                const seenMitre = new Set();
+                caseAlerts.forEach(a => {
+                    if (a.mitre && a.mitre.id && !seenMitre.has(a.mitre.id)) {
+                        seenMitre.add(a.mitre.id);
+                        mitreTechniques.push(a.mitre);
+                    }
+                });
+
+                return {
+                    ...c,
+                    id: String(c.id),
+                    incidentId: incidentId ? String(incidentId) : null,
+                    status: c.status || "triage",
+                    severity: c.severity || "medium",
+                    priority: c.priority || c.severity || "medium",
+                    createdAt: c.created_at || c.createdAt || new Date().toISOString(),
+                    closedAt: c.closed_at || c.closedAt || "",
+                    archived: !!c.archived,
+                    owner: c.assigned_to || c.owner || null,
+                    assignedTo: c.assigned_to || c.assignedTo || null,
+                    alerts: caseAlerts,
+                    alertIds: inc?.alertIds || [],
+                    ip: inc?.ip || "0.0.0.0",
+                    affectedMachine: inc?.affectedMachine || { ip: inc?.ip || "0.0.0.0" },
+                    mitre: mitreTechniques.length ? mitreTechniques : (c.mitre || []),
+                    timeline: c.timeline || [],
+                    notes: c.notes || []
+                };
+            });
+            writeJson(LS_CASES, formattedCases);
+        }
+
+        console.log("✅ SentinelX: Real backend synchronization complete!");
+        emitPlatformDataChanged();
+    } catch (err) {
+        console.error("❌ SentinelX: Real backend synchronization failed:", err);
+    }
+}
+
 /** Seed alerts, generate incidents, demo fallback, and cases when storage is empty — fully offline. */
 let hydrationComplete = false;
 
+function normalizeBackendNotification(item) {
+    return {
+        id: item.id,
+        text: item.title || item.body || "SOC notification",
+        title: item.title,
+        body: item.body,
+        read: !!item.is_read,
+        at: item.created_at ? Date.parse(item.created_at) : Date.now(),
+        category: inferNotificationCategory(item.title || item.body, { category: item.type }),
+        ...item,
+    };
+}
+
+function normalizeBackendAuditLog(item) {
+    return {
+        id: item.id,
+        at: item.created_at || new Date().toISOString(),
+        analyst: item.user?.name || "System",
+        entityType: item.entity_type,
+        entityId: item.entity_id,
+        details: item.details,
+        ...item,
+    };
+}
+
+async function syncOperationalData(userRole = "analyst") {
+    // Dynamically define what to fetch based on role permissions
+    const fetchRules = (userRole === "admin" || userRole === "analyst") 
+        ? getDetectionRules() 
+        : Promise.resolve([]);
+        
+    const fetchIntegrations = (userRole === "admin") 
+        ? getBackendIntegrations() 
+        : Promise.resolve([]);
+        
+    const fetchNotifications = getBackendNotifications({ per_page: 50 });
+    
+    const fetchAuditLogs = (userRole === "admin") 
+        ? getBackendAuditLogs({ per_page: 100 }) 
+        : Promise.resolve([]);
+
+    const [rules, integrations, notifications, auditLogs] = await Promise.allSettled([
+        fetchRules,
+        fetchIntegrations,
+        fetchNotifications,
+        fetchAuditLogs,
+    ]);
+
+    if (rules.status === "fulfilled" && Array.isArray(rules.value)) {
+        backendRulesCache = rules.value;
+    }
+
+    if (integrations.status === "fulfilled" && Array.isArray(integrations.value)) {
+        backendIntegrationsCache = normalizeIntegrationMap(integrations.value);
+        window.dispatchEvent(new CustomEvent("soc_integrations_update"));
+    }
+
+    if (notifications.status === "fulfilled" && Array.isArray(notifications.value)) {
+        backendNotificationsCache = notifications.value.map(normalizeBackendNotification);
+        emitNotifications(backendNotificationsCache);
+    }
+
+    if (auditLogs.status === "fulfilled" && Array.isArray(auditLogs.value)) {
+        backendAuditLogCache = auditLogs.value.map(normalizeBackendAuditLog);
+        window.dispatchEvent(new CustomEvent("soc_audit_update"));
+    }
+}
+
 export function hydrateSocPipeline() {
     if (typeof window === "undefined") return;
+
+    // Trigger real backend sync asynchronously in background
+    syncWithBackend();
 
     try {
         if (hydrationComplete) {

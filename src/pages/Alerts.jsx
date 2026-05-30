@@ -36,7 +36,7 @@ import {
 import { assignAlert, escalateAlert, getAlerts, getSeverityCounts, investigateAlert, updateAlert } from "../store/socStore";
 import "../styles/Alerts.css";
 
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 10;
 
 Chart.register(...registerables);
 
@@ -127,6 +127,7 @@ export default function Alerts({ view } = {}) {
     const [loadingAlerts, setLoadingAlerts] = useState(false);
     const [alertsError, setAlertsError] = useState("");
     const [rowActionBusy, setRowActionBusy] = useState(null);
+    const [sortBy, setSortBy] = useState("newest");
 
     const location = useLocation();
     const mode = view || (location.pathname === "/logs" ? "logs" : "alerts");
@@ -156,6 +157,16 @@ export default function Alerts({ view } = {}) {
         setAppliedTime(pendingTime);
     };
 
+    const alertAssignedToMe = (a) => {
+        const u = getCurrentUser();
+        const cu = userDisplayName(u).trim();
+        const em = (u?.email || "").trim().toLowerCase();
+        if (a.assignedTo === "CURRENT_USER") return true;
+        if (!a.assignedTo) return false;
+        const at = String(a.assignedTo).trim().toLowerCase();
+        return at === cu.toLowerCase() || (!!em && at === em);
+    };
+
     const filterByApplied = (list) => {
         let out = list;
         out = filterByWindow(out, appliedTime);
@@ -177,6 +188,11 @@ export default function Alerts({ view } = {}) {
         else if (appliedSeverity !== "all") {
             const normalized = appliedSeverity.toLowerCase();
             out = out.filter((a) => String(a.severity || "").toLowerCase() === normalized);
+        }
+        if (activeView === "assignments") {
+            out = out.filter((a) => alertAssignedToMe(a));
+        } else if (activeView === "archives") {
+            out = out.filter((a) => String(a.status || "").toLowerCase() === "resolved");
         }
         return out;
     };
@@ -206,12 +222,22 @@ export default function Alerts({ view } = {}) {
     const tableAlertsAll = useMemo(
         () => {
             const filtered = filterByApplied(masterAlerts);
+            const sorted = [...filtered];
+            sorted.sort((a, b) => {
+                const timeA = a.createdAt ? Date.parse(a.createdAt) : 0;
+                const timeB = b.createdAt ? Date.parse(b.createdAt) : 0;
+                if (sortBy === "oldest") {
+                    return timeA - timeB;
+                } else {
+                    return timeB - timeA;
+                }
+            });
             console.log("SEARCH:", search);
             console.log("MASTER:", masterAlerts.length);
-            console.log("TABLE:", filtered.length);
-            return filtered;
+            console.log("TABLE:", sorted.length);
+            return sorted;
         },
-        [masterAlerts, search, appliedSource, appliedSeverity, appliedTime]
+        [masterAlerts, search, appliedSource, appliedSeverity, appliedTime, activeView, sortBy]
     );
     const stats = useMemo(() => {
         // Use masterAlerts for counter statistics (full dataset)
@@ -227,9 +253,8 @@ export default function Alerts({ view } = {}) {
             { label: "Pending Triage", value: pendingCount.toLocaleString(), change: "-1", changeColor: "red" },
         ];
     }, [masterAlerts]);
-    const filtersActive = appliedSource !== "all" || appliedSeverity !== "all" || appliedTime !== "all" || search.trim().length > 1;
-    const alertPageCount = filtersActive ? Math.max(1, Math.ceil(tableAlertsAll.length / PAGE_SIZE)) : 1;
-    const tableAlertsPage = filtersActive ? tableAlertsAll.slice((alertPage - 1) * PAGE_SIZE, alertPage * PAGE_SIZE) : tableAlertsAll;
+    const alertPageCount = Math.max(1, Math.ceil(tableAlertsAll.length / PAGE_SIZE));
+    const tableAlertsPage = tableAlertsAll.slice((alertPage - 1) * PAGE_SIZE, alertPage * PAGE_SIZE);
     const logPageCount = Math.max(1, Math.ceil(filteredLogs.length / PAGE_SIZE));
     const logsPageRows = filteredLogs.slice((logPage - 1) * PAGE_SIZE, logPage * PAGE_SIZE);
 
@@ -254,16 +279,6 @@ export default function Alerts({ view } = {}) {
             setActiveView("all");
         }
     }, [location.pathname]);
-
-    const alertAssignedToMe = (a) => {
-        const u = getCurrentUser();
-        const cu = userDisplayName(u).trim();
-        const em = (u?.email || "").trim().toLowerCase();
-        if (a.assignedTo === "CURRENT_USER") return true;
-        if (!a.assignedTo) return false;
-        const at = String(a.assignedTo).trim().toLowerCase();
-        return at === cu.toLowerCase() || (!!em && at === em);
-    };
 
     useEffect(() => {
         const load = () => {
@@ -446,16 +461,22 @@ export default function Alerts({ view } = {}) {
                         </div>
                     </div>
 
-                    {/* CENTER: Nav Links 👈 الجديد */}
-                    <nav className="al-topbar-nav">
-                        <NavLink to="/dashboard">Dashboard</NavLink>
-                        <NavLink to="/alerts">Alerts</NavLink>
-                        <NavLink to="/incidents">Incidents</NavLink>
-                        <NavLink to="/intelligence">Intelligence</NavLink>
-                        <NavLink to="/cases">Cases</NavLink>
-                        <NavLink to="/audit">Audit & Metrics</NavLink>
-                        <NavLink to="/settings">Settings</NavLink>
-                    </nav>
+                    {/* CENTER: Nav Links */}
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                        const roleType = (user.roleType || "analyst").toLowerCase();
+                        return (
+                            <nav className="al-topbar-nav">
+                                <NavLink to="/dashboard">Dashboard</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                                <NavLink to="/incidents">Incidents</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence">Intelligence</NavLink>}
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                                {roleType === "admin" && <NavLink to="/audit">Audit & Metrics</NavLink>}
+                                {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                            </nav>
+                        );
+                    })()}
 
                     {/* SEARCH */}
                     <div className="al-search-wrap">
@@ -508,6 +529,9 @@ export default function Alerts({ view } = {}) {
                         </button>
                         <button type="button" className="al-filter-btn" onClick={() => cycle(TIME_KEYS, pendingTime, setPendingTime)}>
                             Time: {pendingTime === "24h" ? "Last 24h" : pendingTime === "7d" ? "Last 7d" : "All"} <Calendar size={13} />
+                        </button>
+                        <button type="button" className="al-filter-btn" onClick={() => setSortBy(p => p === "newest" ? "oldest" : "newest")} style={{ color: "#2badee", border: "1px solid rgba(43, 173, 238, 0.4)" }}>
+                            Sort: {sortBy === "newest" ? "Newest First" : "Oldest First"} <ChevronDown size={13} />
                         </button>
                         <div className="al-filter-divider" />
                         <button type="button" className="al-apply-btn" onClick={applyFilters}><Filter size={13} />Apply Filters</button>

@@ -59,8 +59,24 @@ export function isViewer() {
     return getRole() === "viewer";
 }
 
+export function isAdmin() {
+    const u = getCurrentUser();
+    if (u?.roleType) return u.roleType.toLowerCase() === "admin";
+    return getRole() === "admin";
+}
+
+export function isAnalyst() {
+    const u = getCurrentUser();
+    if (u?.roleType) return u.roleType.toLowerCase() === "analyst";
+    return getRole() === "analyst";
+}
+
 export function canMutate() {
     return !isViewer();
+}
+
+export function canMutateSettings() {
+    return isAdmin();
 }
 
 export function roleLabelFromType(rt) {
@@ -140,8 +156,20 @@ export function tryLogin(email, password) {
     return { ok: true };
 }
 
+import { apiPost } from "./api/client";
+
 export function logoutSession() {
+    // Attempt asynchronous server-side token revocation
+    apiPost("v1/auth/logout").catch((e) => {
+        console.warn("Server logout failed or token already revoked", e);
+    });
+
     localStorage.removeItem(LS_AUTH);
     localStorage.removeItem(LS_USER);
     localStorage.removeItem(LS_ROLE);
+    localStorage.removeItem("isAuthToken");
+    localStorage.removeItem("soc_user");
+    localStorage.removeItem("profile_data");
+    localStorage.removeItem("profile_avatar");
 }
+

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate, useParams } from "react-router-dom";
+import Swal from "sweetalert2";
 import {
     Search, Bell, Settings, LayoutDashboard, History,
     UserPlus, GitBranch, CheckCircle, Terminal, Cpu, Network,
@@ -24,8 +25,8 @@ import {
     upsertIncident,
     addIncidentAuditLog,
     getIncidentAuditLogsByIncidentId,
-    logAction,
     executeUnifiedAction,
+    syncWithBackend,
 } from "../platformStore";
 import { getAlerts, updateAlert } from "../store/socStore";
 import { classifyIncident } from "../utils/incidentWorkflow";
@@ -36,7 +37,7 @@ function detectStage(a) {
     if (text.includes("scan") || text.includes("recon")) return "Recon";
     if (text.includes("ssh") || text.includes("login") || text.includes("brute")) return "Access";
     if (text.includes("injection") || text.includes("process")) return "Execution";
-    if (text.includes("network") || text.includes("dns") || text.includes("traffic") || text.includes("c2")) return "C2";
+    if (text.includes("network") || text.includes("dns") || text.includes("traffic") || text.includes("c2") || text.includes("exfil")) return "C2";
     return "Unknown";
 }
 
@@ -110,20 +111,29 @@ export default function IncidentPage() {
         const all = getAlerts();
         return all.find((a) => a.id === alertId) || null;
     }, [alertId, relatedAlerts]);
-    const ip = incident?.ip || baseAlert?.srcIP || "";
+    const ip = incident?.dest_ip || incident?.ip || baseAlert?.dstIP || baseAlert?.srcIP || "";
     const assignedToDisplay = incident?.owner || incident?.assignedTo || assignedTo;
     const incidentStatusValue = String(incident?.status || incidentStatus || "open").trim().toLowerCase();
-    const correlationScore = incident?.correlationScore || 0;
+    const correlationScore = Number(incident?.correlation_score ?? incident?.correlationScore ?? 0);
     const reviewBadge = getReviewBadge(incident?.reviewStatus, incident?.status);
 
     // MOVE linkedCase BEFORE incidentStatusDisplay to prevent crash
     const linkedCase = useMemo(() => {
         if (!incident?.id) return null;
-        const caseId = incident.caseId;
-        if (!caseId) return null;
-        const cases = getCases();
-        return cases.find((c) => c.id === caseId) || null;
-    }, [incident?.caseId, storeTick]);
+        let rawCase = incident.case;
+        if (!rawCase) {
+            const caseId = incident.caseId;
+            if (caseId) {
+                const cases = getCases();
+                rawCase = cases.find((c) => c.id === caseId) || null;
+            }
+        }
+        if (!rawCase) return null;
+        return {
+            ...rawCase,
+            assignedTo: rawCase.assignedTo || rawCase.assigned_to || "Unassigned"
+        };
+    }, [incident?.caseId, incident?.case, storeTick]);
 
     // Determine display status based on incident and case state
     let incidentStatusDisplay = "OPEN";
@@ -194,6 +204,11 @@ export default function IncidentPage() {
         if (!found && sourceAlert) found = list.find((row) => row.alertIds?.includes?.(sourceAlert)) || null;
         if (!found) {
             const hasLookupTarget = Boolean(fromAlert || targetId);
+            if (list.length === 0) {
+                // If lists are still empty/hydrating, fetch from store/API
+                hydrateSocPipeline();
+                return;
+            }
             if (hasLookupTarget && !hydrateRetryRef.current) {
                 hydrateRetryRef.current = true;
                 hydrateSocPipeline();
@@ -201,6 +216,9 @@ export default function IncidentPage() {
                 return;
             }
             if (hasLookupTarget && hydrateRetryRef.current) {
+                if (targetId && targetId === id) {
+                    return;
+                }
                 navigate("/incidents", { replace: true });
                 return;
             }
@@ -209,6 +227,64 @@ export default function IncidentPage() {
         }
         setIncident(found || null);
     }, [alertId, id, incidents, location.state, navigate, sourceAlert]);
+
+    // ── Fetch Incident from real backend API ──────────────────────────────────────
+    useEffect(() => {
+        if (!id) return;
+
+        let isMounted = true;
+        const fetchDetail = async () => {
+            try {
+                const api = await import("../api/socService");
+                const res = await api.getIncidentDetail(id);
+                if (!isMounted || !res) return;
+
+                console.log("Fetched active incident detail from DB:", res);
+
+                // Map database columns to frontend expectations
+                const mappedAlerts = (res.alerts || []).map(a => ({
+                    ...a,
+                    id: String(a.id),
+                    srcIP: a.src_ip || a.srcip || "0.0.0.0",
+                    dstIP: a.dest_ip || a.destip || "0.0.0.0",
+                    desc: a.title || a.description || a.desc || "Security Event Alert",
+                    type: a.alert_type || a.type || "Security Event Alert",
+                    sub: a.sub || "",
+                    createdAt: a.alerted_at || a.created_at || a.createdAt || new Date().toISOString(),
+                    assignedTo: a.assigned_to || a.assignedTo || null,
+                    incidentId: String(a.incident_id || a.incidentId || ""),
+                    status: a.status || "new",
+                    severity: a.severity || "medium"
+                }));
+
+                const mappedIncident = {
+                    ...res,
+                    id: String(res.id),
+                    ip: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
+                    srcIP: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
+                    status: res.status || "open",
+                    severity: res.severity || "medium",
+                    correlationScore: Number(res.correlation_score || res.correlationScore || 0),
+                    owner: res.case?.assigned_to || res.assigned_to || res.owner || "Unassigned",
+                    assignedTo: res.case?.assigned_to || res.assigned_to || res.assignedTo || "Unassigned",
+                    caseId: res.case_id || res.case?.id || null,
+                    alerts: mappedAlerts,
+                    alertIds: mappedAlerts.map(a => a.id),
+                    audit_logs: res.audit_logs || res.auditLogs || []
+                };
+
+                // Upsert to local store
+                upsertIncident(mappedIncident);
+                
+                // Set directly into state so it's instantaneous!
+                setIncident(mappedIncident);
+            } catch (err) {
+                console.error("Error fetching incident detail:", err);
+            }
+        };
+
+        fetchDetail();
+    }, [id]);
 
     // ── Timeline build ─────────────────────────────────────────────────────────
     useEffect(() => {
@@ -266,43 +342,44 @@ export default function IncidentPage() {
             return;
         }
 
-        const created = createCaseFromIncident(incident);
-        if (created?.id) {
-            const updated = {
-                ...incident,
-                autoEscalated: true,
-                caseId: created.id,
-                status: "open",
-                escalated: true,
-                classification: "Pending Review",
-            };
+        createCaseFromIncident(incident).then((created) => {
+            if (created?.id) {
+                const updated = {
+                    ...incident,
+                    autoEscalated: true,
+                    caseId: created.id,
+                    status: "open",
+                    escalated: true,
+                    classification: "Pending Review",
+                };
 
-            upsertIncident(updated);
-            setIncident(updated);
+                upsertIncident(updated);
+                setIncident(updated);
 
-            logAction("escalate_case", { incidentId: incident.id, caseId: created.id, analyst: "System", score, message: `Auto-escalated to case ${created.id}` });
+                logAction("escalate_case", { incidentId: incident.id, caseId: created.id, analyst: "System", score, message: `Auto-escalated to case ${created.id}` });
 
-            pushNotification(`Incident ${incident.id} auto-escalated (score: ${score}/100)`, { category: "incident" });
-            pushNotification(`Case ${created.id} auto-created for incident ${incident.id}`, { category: "case" });
+                pushNotification(`Incident ${incident.id} auto-escalated (score: ${score}/100)`, { category: "incident" });
+                pushNotification(`Case ${created.id} auto-created for incident ${incident.id}`, { category: "case" });
 
-            pushAudit({
-                action: "auto_escalate",
-                entityType: "incident",
-                entityId: incident.id,
-                analyst: "System",
-                message: `Auto-escalated and linked to case ${created.id} (score: ${score}/100)`
-            });
+                pushAudit({
+                    action: "auto_escalate",
+                    entityType: "incident",
+                    entityId: incident.id,
+                    analyst: "System",
+                    message: `Auto-escalated and linked to case ${created.id} (score: ${score}/100)`
+                });
 
-            addIncidentAuditLog({
-                type: "ESCALATED",
-                incidentId: incident.id,
-                caseId: created.id,
-                analyst: "System",
-                decision: "Auto-escalated"
-            });
+                addIncidentAuditLog({
+                    type: "ESCALATED",
+                    incidentId: incident.id,
+                    caseId: created.id,
+                    analyst: "System",
+                    decision: "Auto-escalated"
+                });
 
-            window.dispatchEvent(new Event("soc_platform_data"));
-        }
+                window.dispatchEvent(new Event("soc_platform_data"));
+            }
+        });
     }, [incident?.id]);
 
     // ── Derived intel ──────────────────────────────────────────────────────────
@@ -345,6 +422,81 @@ export default function IncidentPage() {
         [stageBuckets]
     );
 
+    const historyEvents = useMemo(() => {
+        const list = [];
+
+        // 1. Add Incident Audit Logs from Backend
+        if (Array.isArray(incident?.audit_logs)) {
+            incident.audit_logs.forEach((log) => {
+                list.push({
+                    id: `audit-${log.id || log.created_at}`,
+                    title: log.message || `${log.type} Event`,
+                    badge: String(log.type || "AUDIT").toUpperCase(),
+                    badgeColor: "gray",
+                    time: formatTime(log.created_at || new Date()),
+                    timestamp: new Date(log.created_at || new Date()),
+                    source: "System",
+                    color: "blue",
+                    icon: <Settings size={14} />
+                });
+            });
+        } else if (Array.isArray(incidentAuditLogs)) {
+            // Fallback to local store logs
+            incidentAuditLogs.forEach((log) => {
+                list.push({
+                    id: log.id || `audit-${log.timestamp}`,
+                    title: log.message || `${log.type} Event`,
+                    badge: String(log.type || "AUDIT").toUpperCase(),
+                    badgeColor: "gray",
+                    time: formatTime(log.timestamp || new Date()),
+                    timestamp: new Date(log.timestamp || new Date()),
+                    source: log.analyst || "System",
+                    color: "blue",
+                    icon: <Settings size={14} />
+                });
+            });
+        }
+
+        // 2. Add Case Timeline Events
+        if (linkedCase && Array.isArray(linkedCase.timeline)) {
+            linkedCase.timeline.forEach((event) => {
+                list.push({
+                    id: `evt-${event.id || event.created_at}`,
+                    title: event.title,
+                    desc: event.text,
+                    badge: "CASE EVENT",
+                    badgeColor: "amber",
+                    time: formatTime(event.created_at || new Date()),
+                    timestamp: new Date(event.created_at || new Date()),
+                    source: "Case Manager",
+                    color: "amber",
+                    icon: <GitBranch size={14} />
+                });
+            });
+        }
+
+        // 3. Add Case Notes
+        if (linkedCase && Array.isArray(linkedCase.notes)) {
+            linkedCase.notes.forEach((note) => {
+                list.push({
+                    id: `note-${note.id || note.created_at}`,
+                    title: "Analyst Note Added",
+                    desc: note.text,
+                    badge: "NOTE",
+                    badgeColor: "blue",
+                    time: formatTime(note.created_at || new Date()),
+                    timestamp: new Date(note.created_at || new Date()),
+                    source: note.user?.name || "Analyst",
+                    color: "blue",
+                    icon: <User size={14} />
+                });
+            });
+        }
+
+        // 4. Sort all events chronologically (newest first)
+        return list.sort((a, b) => b.timestamp - a.timestamp);
+    }, [incident, incidentAuditLogs, linkedCase]);
+
     const assignedToDisplay2 = assignedToDisplay;
     const ownerLabel = assignedToDisplay2.replace(/\s*\(You\)\s*$/i, "").trim();
     const displayName = assignedToDisplay2 !== "Unassigned" ? ownerLabel || assignedToDisplay2 : "John Doe";
@@ -362,13 +514,26 @@ export default function IncidentPage() {
         if (assignedToDisplay === meTag) return;
         if (assignedToDisplay !== "Unassigned" && assignedToDisplay.replace(/\s*\(You\)\s*$/i, "").trim() === meName) return;
         assignOnceRef.current = true;
-        setAssignedTo(meTag);
-        const persistedAssigned = updateIncidentStatusOnAssign(incident?.id, meTag);
-        const currentStatus = String(incident?.status || "open").toLowerCase();
-        const newStatus = (currentStatus === "new" || currentStatus === "open") ? "triage" : incident?.status;
-        const updatedIncident = { ...(persistedAssigned || incident), owner: meTag, assignedTo: meTag, status: newStatus };
-        setIncident(updatedIncident);
-        upsertIncident(updatedIncident);
+
+        if (linkedCase) {
+            executeUnifiedAction("assign_case", { caseId: linkedCase.id, assignedTo: meName });
+            setAssignedTo(meTag);
+            setIncident((prev) => ({
+                ...prev,
+                owner: meTag,
+                assignedTo: meTag,
+                status: (String(prev?.status || "open").toLowerCase() === "new" || String(prev?.status || "open").toLowerCase() === "open") ? "triage" : prev?.status
+            }));
+        } else {
+            setAssignedTo(meTag);
+            const persistedAssigned = updateIncidentStatusOnAssign(incident?.id, meTag);
+            const currentStatus = String(incident?.status || "open").toLowerCase();
+            const newStatus = (currentStatus === "new" || currentStatus === "open") ? "triage" : incident?.status;
+            const updatedIncident = { ...(persistedAssigned || incident), owner: meTag, assignedTo: meTag, status: newStatus };
+            setIncident(updatedIncident);
+            upsertIncident(updatedIncident);
+        }
+
         pushTimelineEntry({ id: `asg-${Date.now()}`, color: "blue", icon: <UserPlus size={14} />, title: "Assignment", badge: "OWNER", badgeColor: "blue", time: currentTime(), source: "Console", actions: null });
         logAction("assign_incident", { incidentId: incident?.id, analyst: meName, message: `Assigned to ${meName}` });
         pushAudit({ action: "assigned", entityType: "incident", entityId: incident?.id || "—", analyst: meName, message: `Assigned to ${meName}` });
@@ -376,18 +541,36 @@ export default function IncidentPage() {
         window.dispatchEvent(new Event("soc_platform_data"));
     };
 
-    const handleAddNote = () => {
+    const handleAddNote = async () => {
         if (!canMutate() || noteBusy) return;
         const t = note.trim();
         if (!t) return;
         setNoteBusy(true);
-        pushTimelineEntry({ id: `note-${Date.now()}`, color: "blue", icon: <User size={14} />, title: "Investigator Note", badge: "NOTE", badgeColor: "blue", time: currentTime(), source: meName, actions: null, desc: t });
-        logAction("investigate_incident", { incidentId: incident?.id, analyst: meName, message: `Added investigation note` });
-        setNote("");
-        setNoteBusy(false);
+
+        try {
+            const caseId = incident?.caseId || (linkedCase && linkedCase.id);
+            if (caseId) {
+                const api = await import("../api/socService");
+                await api.addCaseNote(caseId, t);
+                pushNotification(`Note added to Case ${caseId}`);
+            } else {
+                pushTimelineEntry({ id: `note-${Date.now()}`, color: "blue", icon: <User size={14} />, title: "Investigator Note", badge: "NOTE", badgeColor: "blue", time: currentTime(), source: meName, actions: null, desc: t });
+            }
+
+            logAction("investigate_incident", { incidentId: incident?.id, analyst: meName, message: `Added investigation note: ${t}` });
+            setNote("");
+            
+            // Re-trigger backend detail fetch & sync!
+            setStoreTick((tick) => tick + 1);
+        } catch (error) {
+            console.error("Failed to add investigator note:", error);
+            pushNotification(`Error adding note: ${error.message}`, { category: "incident" });
+        } finally {
+            setNoteBusy(false);
+        }
     };
 
-    const handleClassifyConfirm = ({ selected, comment }) => {
+    const handleClassifyConfirm = async ({ selected, comment }) => {
         if (!canMutate()) return;
         const classification = selected === "tp" ? "true_positive" : selected === "fp" ? "false_positive" : "duplicate";
         const label = classificationLabel(classification);
@@ -418,13 +601,14 @@ export default function IncidentPage() {
 
             setClassifyOpen(false);
             window.dispatchEvent(new Event("soc_platform_data"));
+            await syncWithBackend();
         } catch (error) {
             console.error("Classification failed:", error);
             pushNotification(`Error classifying incident: ${error.message}`, { category: "incident" });
         }
     };
 
-    const handleEscalateFromIncident = () => {
+    const handleEscalateFromIncident = async () => {
         if (!canMutate() || escalateBusy) return;
         const inc = incident;
         if (!inc?.id) return;
@@ -432,7 +616,7 @@ export default function IncidentPage() {
         try {
             const result = upsertIncident(inc);
             const persisted = result?.incident || inc;
-            const created = createCaseFromIncident(persisted);
+            const created = await createCaseFromIncident(persisted);
             const caseId = created?.id;
             if (caseId) {
                 const updatedIncident = { ...persisted, caseId, escalatedByUser: true };
@@ -440,7 +624,7 @@ export default function IncidentPage() {
                 setIncident(updatedIncident);
                 pushAudit({ action: "create case", entityType: "case", entityId: caseId, message: `Escalated incident ${inc.id}` });
                 pushNotification(`Case ${caseId} linked to ${inc.id}`);
-
+ 
                 // Add incident audit log
                 addIncidentAuditLog({
                     type: "ESCALATED",
@@ -448,7 +632,7 @@ export default function IncidentPage() {
                     caseId: caseId,
                     analyst: meName,
                 });
-
+ 
                 window.dispatchEvent(new Event("soc_platform_data"));
                 navigate("/cases", { state: { caseId } });
             }
@@ -502,9 +686,28 @@ export default function IncidentPage() {
         filterSource === "all" || String(item.source || "").toLowerCase().includes(filterSource)
     );
 
-    const onTimelineActionClick = (a) => {
-        if (a.label === "Investigate IP") { navigate(`/intelligence?ip=${ip}`); return; }
-        if (a.label === "Map Flow") { window.alert(`Mock path: ${ip} → Edge-FW-01 → Core-Switch-02 → FINANCE-WS-04`); return; }
+    const onTimelineActionClick = (a, item) => {
+        const targetIp = item?.srcIP || item?.dstIP || ip;
+        if (a.label === "Investigate IP") { navigate(`/intelligence?ip=${targetIp}`); return; }
+        if (a.label === "Map Flow") {
+            Swal.fire({
+                title: 'Network Flow Path',
+                html: `<div style="font-family: monospace; font-size: 14px; background: #0b1319; border: 1px solid #1a2c38; border-radius: 6px; padding: 15px; color: #a5f3fc; line-height: 1.6;">
+                    ${targetIp} <br/>
+                    <span style="color: #64748b;">↓</span><br/>
+                    Edge-FW-01 <br/>
+                    <span style="color: #64748b;">↓</span><br/>
+                    Core-Switch-02 <br/>
+                    <span style="color: #64748b;">↓</span><br/>
+                    FINANCE-WS-04
+                </div>`,
+                icon: 'info',
+                background: '#121f28',
+                color: '#fff',
+                confirmButtonColor: '#2badee'
+            });
+            return;
+        }
         if (a.label === "Inspect Logs") { navigate("/logs"); return; }
         a.onClick?.();
     };
@@ -541,7 +744,20 @@ export default function IncidentPage() {
     if (incident && alertId && !relatedAlerts?.length && !(Array.isArray(incident.alertIds) && incident.alertIds.includes(alertId))) {
         return <div>No Correlated Alerts</div>;
     }
-    if (!incident) return <div>No incident found</div>;
+    if (!incident) {
+        if (!incidents || incidents.length === 0) {
+            return (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#0b0f19", color: "#92b7c9", fontFamily: "sans-serif" }}>
+                    <div style={{ textAlign: "center" }}>
+                        <div style={{ border: "4px solid rgba(43, 173, 238, 0.1)", borderTop: "4px solid #2badee", borderRadius: "50%", width: "40px", height: "40px", animation: "spin 1s linear infinite", margin: "0 auto 16px" }} />
+                        <p style={{ fontSize: "16px", fontWeight: "500" }}>Loading Incident Details...</p>
+                        <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+                    </div>
+                </div>
+            );
+        }
+        return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#0b0f19", color: "#f87171", fontFamily: "sans-serif" }}>No incident found</div>;
+    }
 
     return (
         <div className="inc-page">
@@ -549,15 +765,21 @@ export default function IncidentPage() {
             <header className="inc-topbar">
                 <div className="inc-topbar-left">
                     <div className="inc-logo"><SocLogo /></div>
-                    <nav className="inc-topnav">
-                        <NavLink to="/dashboard">Dashboard</NavLink>
-                        <NavLink to="/alerts">Alerts</NavLink>
-                        <NavLink to="/incidents" className="active">Incidents</NavLink>
-                        <NavLink to="/intelligence">Intelligence</NavLink>
-                        <NavLink to="/cases">Cases</NavLink>
-                        <NavLink to="/audit">Audit &amp; Metrics</NavLink>
-                        <NavLink to="/settings">Settings</NavLink>
-                    </nav>
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                        const roleType = (user.roleType || "analyst").toLowerCase();
+                        return (
+                            <nav className="inc-topnav">
+                                <NavLink to="/dashboard">Dashboard</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                                <NavLink to="/incidents" className="active">Incidents</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence">Intelligence</NavLink>}
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                                {roleType === "admin" && <NavLink to="/audit">Audit &amp; Metrics</NavLink>}
+                                {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                            </nav>
+                        );
+                    })()}
                 </div>
                 <div className="inc-topbar-right">
                     <div className="inc-search">
@@ -618,7 +840,7 @@ export default function IncidentPage() {
                         <div className="inc-header-left">
                             <div className="inc-header-meta">
                                 <span className="inc-critical-badge">{String(incident?.severity || "critical").toUpperCase()}</span>
-                                <h1>{`#INC-${incident?.id || "—"}`}</h1>
+                                <h1>{String(incident?.id || "").startsWith("INC-") ? `#${incident.id}` : `#INC-${incident?.id || "—"}`}</h1>
                                 <span className={`inc-badge badge-${reviewBadge.color}`} style={{ marginLeft: 12, fontSize: 11 }}>
                                     {reviewBadge.label} ({correlationScore}/100)
                                 </span>
@@ -645,11 +867,52 @@ export default function IncidentPage() {
                                     incident?.autoEscalated === true ||
                                     incident?.caseId;
 
+                                const caseId = incident?.caseId || linkedCase?.id;
+                                const isAssigned = assignedToDisplay && assignedToDisplay !== "Unassigned" && assignedToDisplay !== "";
+                                 const isCaseAssigned = linkedCase && linkedCase.assignedTo && linkedCase.assignedTo !== "Unassigned" && linkedCase.assignedTo !== "";
+
                                 if (alreadyEscalated) {
                                     return (
-                                        <button type="button" className="inc-btn-dark" disabled>
-                                            Already Escalated
-                                        </button>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                                            {!isCaseAssigned && (
+                                                <span className="inc-badge badge-red" style={{ 
+                                                    fontSize: 12, 
+                                                    fontWeight: 600, 
+                                                    padding: "6px 12px", 
+                                                    display: "flex", 
+                                                    alignItems: "center", 
+                                                    gap: 6,
+                                                    border: "1px dashed #ef4444",
+                                                    background: "rgba(239, 68, 68, 0.1)",
+                                                    color: "#f87171"
+                                                }}>
+                                                    ⚠️ Case Unassigned
+                                                </span>
+                                            )}
+                                            {isCaseAssigned && (
+                                                <span className="inc-badge badge-gray" style={{ 
+                                                    fontSize: 12, 
+                                                    fontWeight: 600, 
+                                                    padding: "6px 12px", 
+                                                    display: "flex", 
+                                                    alignItems: "center", 
+                                                    gap: 6,
+                                                    border: "1px solid #4b5563",
+                                                    background: "rgba(75, 85, 99, 0.1)",
+                                                    color: "#9ca3af"
+                                                }}>
+                                                    Case Assigned to: {linkedCase.assignedTo}
+                                                </span>
+                                            )}
+                                            <button 
+                                                type="button" 
+                                                className="inc-btn-dark" 
+                                                onClick={() => navigate("/cases", { state: { caseId } })}
+                                                style={{ border: "1px solid #2badee", color: "#2badee", cursor: "pointer" }}
+                                            >
+                                                View Case →
+                                            </button>
+                                        </div>
                                     );
                                 } else {
                                     return (
@@ -718,7 +981,9 @@ export default function IncidentPage() {
 
                                     {/* Attack Map Flow */}
                                     <div className="inc-corr-result" style={{ margin: "0 20px 20px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                        <span className="inc-badge badge-red" style={{ fontSize: 11, padding: "4px 10px" }}>{ip || "SRC"}</span>
+                                        <span className="inc-badge badge-red" style={{ fontSize: 11, padding: "4px 10px" }}>
+                                            {(relatedAlerts || []).find((a) => a.srcIP)?.srcIP || baseAlert?.srcIP || incident?.dest_ip || "SRC"}
+                                        </span>
                                         {activeStages.map((stage, i) => (
                                             <span key={stage} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                                 <MoveRight size={14} style={{ color: "#92b7c9" }} />
@@ -754,11 +1019,12 @@ export default function IncidentPage() {
                                                     </div>
                                                     {item.sub && <p className="inc-timeline-desc"><strong>Sub:</strong> {item.sub}</p>}
                                                     <p className="inc-timeline-desc"><strong>Source:</strong> {item.source} • <strong>Severity:</strong> {item.severity}</p>
+                                                    {item.srcIP && <p className="inc-timeline-desc"><strong>Source IP:</strong> {item.srcIP}</p>}
                                                     {item.dstIP && <p className="inc-timeline-desc"><strong>Destination:</strong> {item.dstIP}</p>}
                                                     {item.desc && typeof item.desc === "string" && <p className="inc-timeline-desc">{item.desc}</p>}
                                                     <div className="inc-timeline-btns">
                                                         {(item.actions || []).map((a, i) => (
-                                                            <button key={`action-${item.id}-${i}`} type="button" className={`${a.primary ? "btn-primary primary" : "btn-outline"} inc-action-btn`} onClick={() => onTimelineActionClick(a)} disabled={a.disabled || !canMutate()}>{a.label}{a.disabled ? " ✓" : ""}</button>
+                                                            <button key={`action-${item.id}-${i}`} type="button" className={`${a.primary ? "btn-primary primary" : "btn-outline"} inc-action-btn`} onClick={() => onTimelineActionClick(a, item)} disabled={a.disabled || !canMutate()}>{a.label}{a.disabled ? " ✓" : ""}</button>
                                                         ))}
                                                     </div>
                                                 </div>
@@ -801,29 +1067,30 @@ export default function IncidentPage() {
                             {ctxNav === "history" && (
                                 <div className="inc-card">
                                     <div className="inc-card-header">
-                                        <span className="inc-card-title">Full History</span>
-                                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                            {["all", "wazuh", "sysmon", "suricata", "network ml"].map((src) => (
-                                                <button key={src} type="button" className="inc-filter-btn" onClick={() => setFilterSource(src === "all" ? "all" : src)}>
-                                                    {src === "all" ? "All" : src}
-                                                </button>
-                                            ))}
-                                        </div>
+                                        <span className="inc-card-title">Full History &amp; Audit Logs</span>
                                     </div>
                                     <div className="inc-timeline">
-                                        {filteredTimeline.map((item, idx) => (
-                                            <div key={item.id} className={`inc-timeline-item ${idx < filteredTimeline.length - 1 ? "has-line" : ""}`}>
-                                                <div className={`inc-timeline-dot dot-${item.color}`}>{item.icon}</div>
-                                                <div className="inc-timeline-content">
-                                                    <div className="inc-timeline-top">
-                                                        <h4>{item.title}<span className={`inc-badge badge-${item.badgeColor}`}>{item.badge}</span></h4>
+                                        {historyEvents.length > 0 ? (
+                                            historyEvents.map((item, idx) => (
+                                                <div key={item.id} className={`inc-timeline-item ${idx < historyEvents.length - 1 ? "has-line" : ""}`}>
+                                                    <div className={`inc-timeline-dot dot-${item.color}`}>{item.icon}</div>
+                                                    <div className="inc-timeline-content">
+                                                        <div className="inc-timeline-top">
+                                                            <h4>{item.title}<span className={`inc-badge badge-${item.badgeColor}`}>{item.badge}</span></h4>
+                                                        </div>
+                                                        {item.desc && <p className="inc-timeline-desc">{item.desc}</p>}
+                                                        <p className="inc-timeline-desc"><strong>Actor/Source:</strong> {item.source}</p>
                                                     </div>
-                                                    <p className="inc-timeline-desc"><strong>Source:</strong> {item.source} • <strong>Severity:</strong> {item.severity}</p>
-                                                    {item.desc && typeof item.desc === "string" && <p className="inc-timeline-desc">{item.desc}</p>}
+                                                    <div className="inc-time">{item.time}</div>
                                                 </div>
-                                                <div className="inc-time">{item.time}</div>
+                                            ))
+                                        ) : (
+                                            <div className="inc-empty-state" style={{ padding: "40px 20px" }}>
+                                                <History size={36} style={{ color: "#4b5563" }} />
+                                                <h4>No History Events Found</h4>
+                                                <p>No audit logs or case timeline events are recorded for this incident.</p>
                                             </div>
-                                        ))}
+                                        )}
                                     </div>
                                 </div>
                             )}

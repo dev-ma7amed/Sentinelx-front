@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import Swal from "sweetalert2";
 import {
     Search, Bell, Settings, FolderOpen, Folder,
     PlusCircle, User, AlertTriangle, Clock, Archive,
@@ -13,7 +14,7 @@ import { HeaderMenuAvatar, HeaderNotificationBell, HeaderSettingsNav } from "../
 import { SocLogo } from "../components/SocLogo";
 import { canMutate, getCurrentUser, logoutSession, userDisplayName } from "../session";
 import { formatTime } from "../utils/formatTime";
-import { getCases, getIncidents, createCaseFromIncident, pushAudit, pushNotification, setCases, syncIncidentStatusWithCase, executeUnifiedAction } from "../platformStore";
+import { getCases, getIncidents, createCaseFromIncident, pushAudit, pushNotification, setCases, syncIncidentStatusWithCase, executeUnifiedAction, syncWithBackend } from "../platformStore";
 import { addAuditLog, AUDIT_ACTIONS, AUDIT_SEVERITY } from "../services/auditLogger";
 
 const PHASES = ["detection", "triage", "containment", "eradication", "recovery", "closed"];
@@ -56,9 +57,9 @@ function checkAndEscalateMaliciousIoc(caseItem) {
 
 function buildInitialAuditLog(caseItem) {
     const baseMs = Date.parse(caseItem?.createdAt || "") || Date.now();
-    return [
+    const mockEvents = [
         {
-            id: 1,
+            id: "mock-1",
             type: "primary",
             icon: <Shield size={14} />,
             title: "Automated Containment",
@@ -66,7 +67,7 @@ function buildInitialAuditLog(caseItem) {
             text: <>System isolated endpoint <code>{caseItem?.affectedMachine?.hostname || caseItem?.ip || "target-host"}</code> after suspicious PowerShell execution.</>,
         },
         {
-            id: 2,
+            id: "mock-2",
             type: "secondary",
             icon: <User size={14} />,
             title: "Analyst Assigned",
@@ -74,7 +75,7 @@ function buildInitialAuditLog(caseItem) {
             text: <>Lead analyst <span className="cases-highlight">{caseItem?.openedBy || "SOC Analyst"}</span> took ownership of the case.</>,
         },
         {
-            id: 3,
+            id: "mock-3",
             type: "secondary",
             icon: <Link size={14} />,
             title: "Incident Linked",
@@ -82,7 +83,7 @@ function buildInitialAuditLog(caseItem) {
             text: <>Alert IDs <code>{(caseItem?.alertIds || []).slice(0, 2).join(", ") || caseItem?.incidentId || "—"}</code> correlated into this case.</>,
         },
         {
-            id: 4,
+            id: "mock-4",
             type: "secondary",
             icon: <AlertCircle size={14} />,
             title: "Priority Escalated",
@@ -90,6 +91,19 @@ function buildInitialAuditLog(caseItem) {
             text: <>Status changed to <span className="cases-text-red">{caseItem?.severityLabel || "HIGH"}</span> by correlation engine.</>,
         },
     ];
+
+    const realEvents = (Array.isArray(caseItem?.timeline) ? caseItem.timeline : []).map((t, idx) => ({
+        id: t.id || `real-${idx}-${t.created_at}`,
+        type: t.type || "secondary",
+        icon: t.type === "primary" ? <Shield size={14} /> : <Zap size={14} />,
+        title: t.title || "Case Event",
+        at: t.created_at || t.createdAt || new Date().toISOString(),
+        text: t.text || "",
+    }));
+
+    const combined = [...realEvents, ...mockEvents];
+    combined.sort((a, b) => new Date(b.at) - new Date(a.at));
+    return combined;
 }
 
 const buildCaseStateRow = (c) => {
@@ -145,6 +159,7 @@ export default function Cases() {
     });
     const [caseViewFilter, setCaseViewFilter] = useState("all"); // all|mine|high|pending|archived
     const [caseSearch, setCaseSearch] = useState("");
+    const [casePage, setCasePage] = useState(1);
     const [highlightedCaseId, setHighlightedCaseId] = useState(null);
 
     const [caseStates, setCaseStates] = useState(() => {
@@ -152,6 +167,21 @@ export default function Cases() {
         const seed = stored?.length ? stored : [];
         return Object.fromEntries(seed.map((c) => [c.id, buildCaseStateRow(c)]));
     });
+
+    useEffect(() => {
+        const stateCaseId = location.state?.caseId;
+        const params = new URLSearchParams(location.search);
+        const queryCaseId = params.get("caseId");
+        const targetCaseId = stateCaseId || queryCaseId;
+        if (targetCaseId) {
+            setSelectedCaseId(targetCaseId);
+            setCaseViewFilter("all");
+        }
+    }, [location]);
+
+    useEffect(() => {
+        setCasePage(1);
+    }, [caseViewFilter, caseSearch]);
 
     const selectedCase = useMemo(() => caseList.find((c) => c.id === selectedCaseId) || caseList[0] || null, [caseList, selectedCaseId]);
     const incidentForClassifyModal = useMemo(() => {
@@ -454,7 +484,7 @@ export default function Cases() {
         setClassifyOpen(true);
     };
 
-    const handleClassifyConfirm = ({ selected, comment }) => {
+    const handleClassifyConfirm = async ({ selected, comment }) => {
         if (!canMutate()) return;
         const classification = selected === "tp" ? "true_positive" : selected === "fp" ? "false_positive" : "duplicate";
         const label = selected === "tp" ? "True Positive" : selected === "fp" ? "False Positive" : "Duplicate";
@@ -499,6 +529,7 @@ export default function Cases() {
                 comment && comment.trim() ? <>{comment}</> : null
             );
             pushNotification(`Case ${selectedCaseId} classified: ${label}`);
+            await syncWithBackend();
         }
 
         setClassifyOpen(false);
@@ -561,21 +592,37 @@ export default function Cases() {
         const result = executeUnifiedAction("escalate_case", {
             caseId: selectedCaseId,
             level: escalateLevel,
+            assignee: escalateAssignee,
             reason,
             analyst: userDisplayName(getCurrentUser()),
         });
 
         if (result) {
-            // Update caseList with escalation (mark as pending) and persist to store
+            // Update caseList with escalation and persist to store
             const next = caseList.map((c) =>
                 c.id === selectedCaseId
                     ? {
                         ...c,
+                        status: "escalated",
+                        assignedTo: escalateAssignee,
                         pending: true,
+                        escalated: true,
+                        escalatedTo: escalateLevel,
+                        escalationReason: reason,
                     }
                     : c
             );
             persistCaseList(next);
+
+            // Update local state
+            updateSelectedCaseState((cur) => ({
+                ...cur,
+                assignedTo: escalateAssignee,
+                pending: true,
+                currentStatus: "Escalated",
+                activePhase: "triage",
+                currentPhase: "Investigation Phase",
+            }));
 
             addAudit(`Escalated to ${escalateLevel} / ${escalateAssignee}: ${reason}`, "secondary");
             pushNotification(`Case ${selectedCaseId} escalated to ${escalateLevel}`);
@@ -594,8 +641,26 @@ export default function Cases() {
         }));
     }, [caseList, caseStates]);
 
+    const baseVisibleCases = useMemo(() => {
+        const u = getCurrentUser();
+        const isAdminUser = u?.roleType === "admin" || getRole() === "admin";
+        if (isAdminUser) return mergedCases;
+
+        const nm = userDisplayName(u).trim().toLowerCase();
+        const em = (u?.email || "").trim().toLowerCase();
+        return mergedCases.filter((c) => {
+            const isCaseUnassigned = !c.assignedTo || c.assignedTo === "Unassigned" || c.assignedTo === "";
+            if (isCaseUnassigned) return true;
+            if (c.isMine) return true;
+            if (c.assignedTo === "CURRENT_USER") return true;
+            const r = resolveAssign(c.assignedTo);
+            const rl = String(r || "").trim().toLowerCase();
+            return rl === nm || (!!em && rl === em);
+        });
+    }, [mergedCases]);
+
     const filteredCases = useMemo(() => {
-        let list = mergedCases;
+        let list = baseVisibleCases;
         const q = caseSearch.trim().toLowerCase();
         if (q) list = list.filter((c) => c.id.toLowerCase().includes(q) || c.title.toLowerCase().includes(q));
 
@@ -642,7 +707,7 @@ export default function Cases() {
         }
 
         return list;
-    }, [mergedCases, caseSearch, caseViewFilter]);
+    }, [baseVisibleCases, caseSearch, caseViewFilter]);
 
     const filterCounts = useMemo(() => {
         const u = getCurrentUser();
@@ -650,7 +715,7 @@ export default function Cases() {
         const em = (u?.email || "").trim().toLowerCase();
 
         // My Assignments: assignedTo exists OR isMine === true
-        const mine = mergedCases.filter((c) => {
+        const mine = baseVisibleCases.filter((c) => {
             if (c.isMine) return true;
             if (c.assignedTo === "CURRENT_USER") return true;
             if (!c.assignedTo) return false;
@@ -660,13 +725,13 @@ export default function Cases() {
         }).length;
 
         // High Priority: severity/priority === "critical" OR "high"
-        const high = mergedCases.filter((c) => {
+        const high = baseVisibleCases.filter((c) => {
             const sev = String(c.severity || c.priority || "").toLowerCase();
             return sev === "critical" || sev === "high";
         }).length;
 
         // Pending Review: pending === true OR status === "pending" OR reviewStatus === "pending"
-        const pending = mergedCases.filter((c) => {
+        const pending = baseVisibleCases.filter((c) => {
             if (c.pending === true) return true;
             const status = String(c.status || "").toLowerCase();
             if (status === "pending") return true;
@@ -676,7 +741,7 @@ export default function Cases() {
         }).length;
 
         // Archived: archived === true OR status === "closed" OR closedAt exists
-        const archived = mergedCases.filter((c) => {
+        const archived = baseVisibleCases.filter((c) => {
             if (c.archived === true) return true;
             const status = String(c.status || "").toLowerCase();
             if (status === "closed") return true;
@@ -685,7 +750,7 @@ export default function Cases() {
         }).length;
 
         return { mine, high, pending, archived };
-    }, [mergedCases]);
+    }, [baseVisibleCases]);
 
     const systemStatus = useMemo(() => {
         const criticalOpen = mergedCases.some(
@@ -732,51 +797,98 @@ export default function Cases() {
     const handleNewCase = () => {
         if (!canMutate()) return;
         const incidents = getIncidents();
-        const latest = incidents[0];
-        if (!latest) {
-            window.alert("Create cases from incidents.");
+        if (!incidents || !incidents.length) {
+            Swal.fire({
+                title: 'No Incidents',
+                text: 'Please create cases directly from incidents list.',
+                icon: 'warning',
+                background: '#121f28',
+                color: '#fff',
+                confirmButtonColor: '#2badee'
+            });
             return;
         }
+
         const existingCases = getCases();
-        const existing = existingCases.find((c) => c.incidentId === latest.id);
-        if (existing) {
-            setSelectedCaseId(existing.id);
+        const availableIncidents = incidents.filter(
+            (inc) => !existingCases.some((c) => String(c.incidentId) === String(inc.id))
+        );
+
+        if (availableIncidents.length === 0) {
+            Swal.fire({
+                title: 'No Available Incidents',
+                text: 'All active incidents already have associated cases. You can view them in the Incidents tab.',
+                icon: 'info',
+                background: '#121f28',
+                color: '#fff',
+                confirmButtonColor: '#2badee'
+            });
             return;
         }
-        const owner = userDisplayName(getCurrentUser());
-        const severity = String(latest.severity || "high").toLowerCase();
-        const row = {
-            id: `CR-${Date.now()}`,
-            title: `Incident ${latest.id}`,
-            dot: severity === "critical" ? "red" : severity === "high" ? "yellow" : "green",
-            severityLabel: severity.charAt(0).toUpperCase() + severity.slice(1),
-            openedBy: owner,
-            description: `Case from incident ${latest.id}`,
-            note: "",
-            source: "incident",
-            incidentId: latest.id,
-            createdAt: new Date().toISOString(),
-            priority: severity,
-            assignedTo: owner,
-            isMine: true,
-            archived: false,
-            pending: true,
-            mitre: latest.mitre || [],
-            alertIds: latest.alertIds || [],
-            ip: latest.ip || "",
-            affectedMachine: latest.affectedMachine || {},
-            alerts: latest.alerts || [],
-            confidence: latest.confidence ?? null,
-            notes: [],
-            status: "triage",
-            createdManually: true,
-        };
-        const nextCases = [...existingCases, row];
-        persistCaseList(nextCases);
-        setCaseStates((prev) => (prev[row.id] ? prev : { ...prev, [row.id]: buildCaseStateRow(row) }));
-        setSelectedCaseId(row.id);
-        setCaseViewFilter("all");
-        pushNotification(`New case ${row.id} created`);
+
+        const optionsHtml = availableIncidents.map((inc) => {
+            const label = `[${String(inc.severity || 'high').toUpperCase()}] ${inc.title || 'Incident ' + inc.id} (${inc.id})`;
+            return `<option value="${inc.id}">${label}</option>`;
+        }).join('');
+
+        Swal.fire({
+            title: 'Create Case from Incident',
+            html: `
+                <div class="swal-field-group" style="text-align: left; margin-bottom: 15px;">
+                    <label style="display: block; font-size: 13px; color: #92b7c9; margin-bottom: 5px;">Select Incident to Triage</label>
+                    <select id="swal-select-incident" class="swal2-input" style="margin: 0; width: 100%; box-sizing: border-box; background: #0b1319; color: #fff; border: 1px solid #1a2c38; border-radius: 4px; padding: 10px; height: auto;">
+                        ${optionsHtml}
+                    </select>
+                </div>
+            `,
+            showCancelButton: true,
+            confirmButtonText: 'Create Case',
+            cancelButtonText: 'Cancel',
+            background: '#121f28',
+            color: '#fff',
+            confirmButtonColor: '#2badee',
+            cancelButtonColor: '#1a2c38',
+            customClass: {
+                popup: 'swal-enterprise-dark',
+            },
+            preConfirm: () => {
+                const selectEl = document.getElementById('swal-select-incident');
+                return selectEl ? selectEl.value : null;
+            }
+        }).then(async (result) => {
+            if (result.isConfirmed && result.value) {
+                const selectedIncId = result.value;
+                const incident = availableIncidents.find((inc) => String(inc.id) === String(selectedIncId));
+                if (incident) {
+                    try {
+                        Swal.fire({
+                            title: 'Creating Case...',
+                            text: 'Initializing case triage workflow on the SOC backend.',
+                            allowOutsideClick: false,
+                            didOpen: () => {
+                                Swal.showLoading();
+                            }
+                        });
+                        const createdCase = await createCaseFromIncident(incident);
+                        if (createdCase) {
+                            setSelectedCaseId(createdCase.id);
+                            setCaseViewFilter("all");
+                            Swal.close();
+                            pushNotification(`New case ${createdCase.id} successfully created and synced.`);
+                        }
+                    } catch (err) {
+                        Swal.fire({
+                            title: 'Error Creating Case',
+                            text: err.message || 'Failed to create case on backend.',
+                            icon: 'error',
+                            background: '#121f28',
+                            color: '#fff',
+                            confirmButtonColor: '#ef4444'
+                        });
+                    }
+                }
+            }
+        });
     };
 
     useEffect(() => {
@@ -793,7 +905,15 @@ export default function Cases() {
             const next = {};
             fresh.forEach((c) => {
                 next[c.id] = prev[c.id]
-                    ? { ...prev[c.id], archived: c.archived, pending: c.pending, assignedTo: c.assignedTo, isMine: c.isMine, priority: c.priority }
+                    ? { 
+                        ...prev[c.id], 
+                        archived: c.archived, 
+                        pending: c.pending, 
+                        assignedTo: c.assignedTo, 
+                        isMine: c.isMine, 
+                        priority: c.priority,
+                        auditLog: buildInitialAuditLog(c).map((x) => ({ ...x, id: x.id }))
+                      }
                     : buildCaseStateRow(c);
             });
             return next;
@@ -807,6 +927,33 @@ export default function Cases() {
             }, 2000);
         }
     }, [location.state]);
+
+    useEffect(() => {
+        const handlePlatformData = () => {
+            const fresh = getCases();
+            setCaseList(fresh);
+            setCaseStates((prev) => {
+                const next = {};
+                fresh.forEach((c) => {
+                    next[c.id] = prev[c.id]
+                        ? {
+                            ...prev[c.id],
+                            archived: c.archived,
+                            pending: c.pending,
+                            assignedTo: c.assignedTo,
+                            isMine: c.isMine,
+                            priority: c.priority,
+                            auditLog: buildInitialAuditLog(c).map((x) => ({ ...x, id: x.id }))
+                        }
+                        : buildCaseStateRow(c);
+                });
+                return next;
+            });
+        };
+
+        window.addEventListener("soc_platform_data", handlePlatformData);
+        return () => window.removeEventListener("soc_platform_data", handlePlatformData);
+    }, []);
 
     useEffect(() => {
         if (!showConfirm && !assignOpen && !escalateOpen && !classifyOpen) return;
@@ -943,22 +1090,40 @@ export default function Cases() {
 
     const handleDeleteCase = () => {
         if (!canMutate()) return;
-        if (!window.confirm(`Delete ${selectedCaseId}?`)) return;
-        const delId = selectedCaseId;
-        setCaseList((prev) => {
-            const next = prev.filter((x) => x.id !== delId);
-            setCases(next);
-            const nextId = next[0]?.id || "";
-            if (nextId && nextId !== delId) setSelectedCaseId(nextId);
-            return next;
+        
+        Swal.fire({
+            title: 'Delete Case?',
+            text: `Are you sure you want to remove ${selectedCaseId} from your active dashboard view?`,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Yes, Delete',
+            cancelButtonText: 'Cancel',
+            background: '#121f28',
+            color: '#fff',
+            confirmButtonColor: '#ef4444',
+            cancelButtonColor: '#1a2c38',
+            customClass: {
+                popup: 'swal-enterprise-dark',
+            }
+        }).then((result) => {
+            if (result.isConfirmed) {
+                const delId = selectedCaseId;
+                setCaseList((prev) => {
+                    const next = prev.filter((x) => x.id !== delId);
+                    setCases(next);
+                    const nextId = next[0]?.id || "";
+                    if (nextId && nextId !== delId) setSelectedCaseId(nextId);
+                    return next;
+                });
+                setCaseStates((prev) => {
+                    const next = { ...prev };
+                    delete next[delId];
+                    return next;
+                });
+                pushAudit({ action: "delete", entityType: "case", entityId: delId, message: "Deleted case" });
+                pushNotification(`Case ${delId} deleted`);
+            }
         });
-        setCaseStates((prev) => {
-            const next = { ...prev };
-            delete next[delId];
-            return next;
-        });
-        pushAudit({ action: "delete", entityType: "case", entityId: delId, message: "Deleted case" });
-        pushNotification(`Case ${delId} deleted`);
     };
 
     return (
@@ -970,21 +1135,21 @@ export default function Cases() {
                     <div className="cases-logo">
                         <SocLogo />
                     </div>
-                    <nav className="cases-topnav">
-                        <NavLink to="/dashboard">Dashboard</NavLink>
-
-                        <NavLink to="/alerts">Alerts</NavLink>
-
-                        <NavLink to="/incidents">Incidents</NavLink>
-
-                        <NavLink to="/intelligence">Intelligence</NavLink>
-
-                        <NavLink to="/cases">Cases</NavLink>
-
-                        <NavLink to="/audit">Audit & Metrics</NavLink>
-
-                        <NavLink to="/settings">Settings</NavLink>
-                    </nav>
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                        const roleType = (user.roleType || "analyst").toLowerCase();
+                        return (
+                            <nav className="cases-topnav">
+                                <NavLink to="/dashboard">Dashboard</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                                <NavLink to="/incidents">Incidents</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence">Intelligence</NavLink>}
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                                {roleType === "admin" && <NavLink to="/audit">Audit & Metrics</NavLink>}
+                                {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                            </nav>
+                        );
+                    })()}
                     <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "#92b7c9" }}>
                         <span>System Status:</span>
                         <span style={{ fontSize: "16px" }}>{systemStatus.dot}</span>
@@ -1030,35 +1195,123 @@ export default function Cases() {
                         <div className="cases-list">
                             {filteredCases.length === 0 ? (
                                 selectedCase ? (
-                                    <div className={`cases-list-item active`}>
-                                        <FolderOpen size={18} className="cases-list-icon active" />
-                                        <div className="cases-list-info">
-                                            <p className="cases-list-id">{selectedCase.id}</p>
-                                            <span>{selectedCase.title}</span>
-                                        </div>
-                                        <div className={`cases-status-dot ${selectedCase.dot}`} />
-                                    </div>
+                                    (() => {
+                                        const isCaseUnassigned = !selectedCase.assignedTo || selectedCase.assignedTo === "Unassigned" || selectedCase.assignedTo === "";
+                                        return (
+                                            <div className={`cases-list-item active`}>
+                                                <FolderOpen size={18} className="cases-list-icon active" />
+                                                <div className="cases-list-info">
+                                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                        <p className="cases-list-id">{selectedCase.id}</p>
+                                                        {isCaseUnassigned && (
+                                                            <span className="cases-unassigned-badge" style={{
+                                                                fontSize: "9px",
+                                                                fontWeight: "bold",
+                                                                textTransform: "uppercase",
+                                                                color: "#ef4444",
+                                                                border: "1px dashed rgba(239, 68, 68, 0.4)",
+                                                                padding: "1px 4px",
+                                                                borderRadius: "3px",
+                                                                background: "rgba(239, 68, 68, 0.05)",
+                                                                lineHeight: "1"
+                                                            }}>
+                                                                Unassigned
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <span>{selectedCase.title}</span>
+                                                </div>
+                                                <div className={`cases-status-dot ${selectedCase.dot}`} />
+                                            </div>
+                                        );
+                                    })()
                                 ) : (
                                     <p className="cases-note" style={{ padding: "12px 16px" }}>No data available</p>
                                 )
-                            ) : filteredCases.map((c) => (
-                                <div
-                                    key={c.id}
-                                    className={`cases-list-item case-row ${selectedCaseId === c.id ? "active" : ""} ${highlightedCaseId === c.id ? "highlight" : ""}`}
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={() => setSelectedCaseId(c.id)}
-                                    onKeyDown={(e) => e.key === "Enter" && setSelectedCaseId(c.id)}
-                                >
-                                    {selectedCaseId === c.id ? <FolderOpen size={18} className="cases-list-icon active" /> : <Folder size={18} className="cases-list-icon" />}
-                                    <div className="cases-list-info">
-                                        <p className="cases-list-id">{c.id}</p>
-                                        <span>{c.title}</span>
+                            ) : filteredCases.slice((casePage - 1) * 10, casePage * 10).map((c) => {
+                                const isCaseUnassigned = !c.assignedTo || c.assignedTo === "Unassigned" || c.assignedTo === "";
+                                return (
+                                    <div
+                                        key={c.id}
+                                        className={`cases-list-item case-row ${selectedCaseId === c.id ? "active" : ""} ${highlightedCaseId === c.id ? "highlight" : ""}`}
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={() => setSelectedCaseId(c.id)}
+                                        onKeyDown={(e) => e.key === "Enter" && setSelectedCaseId(c.id)}
+                                    >
+                                        {selectedCaseId === c.id ? <FolderOpen size={18} className="cases-list-icon active" /> : <Folder size={18} className="cases-list-icon" />}
+                                        <div className="cases-list-info">
+                                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                <p className="cases-list-id">{c.id}</p>
+                                                {isCaseUnassigned && (
+                                                    <span className="cases-unassigned-badge" style={{
+                                                        fontSize: "9px",
+                                                        fontWeight: "bold",
+                                                        textTransform: "uppercase",
+                                                        color: "#ef4444",
+                                                        border: "1px dashed rgba(239, 68, 68, 0.4)",
+                                                        padding: "1px 4px",
+                                                        borderRadius: "3px",
+                                                        background: "rgba(239, 68, 68, 0.05)",
+                                                        lineHeight: "1"
+                                                    }}>
+                                                        Unassigned
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <span>{c.title}</span>
+                                        </div>
+                                        <div className={`cases-status-dot ${c.dot}`} />
                                     </div>
-                                    <div className={`cases-status-dot ${c.dot}`} />
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
+
+                        {/* PAGINATION */}
+                        {filteredCases.length > 10 && (
+                            <div className="cases-pagination" style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                padding: "10px 16px",
+                                borderBottom: "1px solid rgba(255, 255, 255, 0.05)",
+                                fontSize: "11px",
+                                color: "#94a3b8",
+                                background: "rgba(255, 255, 255, 0.01)"
+                            }}>
+                                <button
+                                    type="button"
+                                    onClick={() => setCasePage(p => Math.max(1, p - 1))}
+                                    disabled={casePage === 1}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        color: casePage === 1 ? "rgba(255, 255, 255, 0.15)" : "#3b82f6",
+                                        cursor: casePage === 1 ? "not-allowed" : "pointer",
+                                        padding: "2px 6px",
+                                        fontWeight: "600"
+                                    }}
+                                >
+                                    &larr; Prev
+                                </button>
+                                <span style={{ fontFamily: "monospace" }}>Page {casePage} of {Math.ceil(filteredCases.length / 10)}</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setCasePage(p => Math.min(Math.ceil(filteredCases.length / 10), p + 1))}
+                                    disabled={casePage === Math.ceil(filteredCases.length / 10)}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        color: casePage === Math.ceil(filteredCases.length / 10) ? "rgba(255, 255, 255, 0.15)" : "#3b82f6",
+                                        cursor: casePage === Math.ceil(filteredCases.length / 10) ? "not-allowed" : "pointer",
+                                        padding: "2px 6px",
+                                        fontWeight: "600"
+                                    }}
+                                >
+                                    Next &rarr;
+                                </button>
+                            </div>
+                        )}
 
                         <div className="cases-views">
                             <p className="cases-views-title">Views</p>

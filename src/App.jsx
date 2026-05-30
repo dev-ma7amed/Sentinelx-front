@@ -14,15 +14,21 @@ import { ensureSocProfileDefaults } from "./socProfile";
 import { hydrateSocPipeline } from "./platformStore";
 import "./styles/enterprise.css";
 
-function RequireAuth({ children }) {
+function RequireAuth({ children, allowedRoles }) {
   useEffect(() => {
     ensureSocProfileDefaults();
   }, []);
-  if (
-    typeof window !== "undefined"
-    && (localStorage.getItem(LS_AUTH) !== "true" || !getCurrentUser())
-  ) {
-    return <Navigate to="/" replace />;
+  if (typeof window !== "undefined") {
+    if (localStorage.getItem(LS_AUTH) !== "true" || !getCurrentUser()) {
+      return <Navigate to="/" replace />;
+    }
+    if (allowedRoles) {
+      const user = getCurrentUser();
+      const roleType = (user?.roleType || "analyst").toLowerCase();
+      if (!allowedRoles.includes(roleType)) {
+        return <Navigate to="/dashboard" replace />;
+      }
+    }
   }
   return children;
 }
@@ -43,15 +49,15 @@ export default function App() {
     <Routes>
       <Route path="/" element={<Login />} />
       <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
-      <Route path="/alerts" element={<RequireAuth><Alerts /></RequireAuth>} />
-      <Route path="/logs" element={<RequireAuth><Alerts view="logs" /></RequireAuth>} />
+      <Route path="/alerts" element={<RequireAuth allowedRoles={["admin", "analyst"]}><Alerts /></RequireAuth>} />
+      <Route path="/logs" element={<RequireAuth allowedRoles={["admin", "analyst"]}><Alerts view="logs" /></RequireAuth>} />
       <Route path="/incidents" element={<RequireAuth><IncidentList /></RequireAuth>} />
       <Route path="/incident/:id" element={<RequireAuth><IncidentPage /></RequireAuth>} />
       <Route path="/incident" element={<RequireAuth><IncidentPage /></RequireAuth>} />
-      <Route path="/intelligence" element={<RequireAuth><Intelligence /></RequireAuth>} />
-      <Route path="/cases" element={<RequireAuth><Cases /></RequireAuth>} />
-      <Route path="/audit" element={<RequireAuth><AuditMetrics /></RequireAuth>} />
-      <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+      <Route path="/intelligence" element={<RequireAuth allowedRoles={["admin", "analyst"]}><Intelligence /></RequireAuth>} />
+      <Route path="/cases" element={<RequireAuth allowedRoles={["admin", "analyst"]}><Cases /></RequireAuth>} />
+      <Route path="/audit" element={<RequireAuth allowedRoles={["admin"]}><AuditMetrics /></RequireAuth>} />
+      <Route path="/settings" element={<RequireAuth allowedRoles={["admin"]}><Settings /></RequireAuth>} />
       <Route path="/Settings" element={<Navigate to="/settings" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

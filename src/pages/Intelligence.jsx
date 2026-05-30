@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import "../styles/Intelligence.css";
 import { logoutSession } from "../session";
-import { getIntegrations } from "../platformStore";
 import { formatTime } from "../utils/formatTime";
 
 const navItems = [
@@ -75,7 +74,7 @@ export default function Intelligence() {
         setIntelLoading(true);
         setRescanCount((n) => n + 1);
         try {
-            const result = await enrichIP(indicator);
+            const result = await enrichIP(indicator, true);
             setApiIntel(result);
             setIntelError(null);
         } catch (error) {
@@ -234,15 +233,21 @@ export default function Intelligence() {
                     <div className="intel-logo">
                         <SocLogo />
                     </div>
-                    <nav className="intel-topnav">
-                        <NavLink to="/dashboard">Dashboard</NavLink>
-                        <NavLink to="/alerts">Alerts</NavLink>
-                        <NavLink to="/incidents">Incidents</NavLink>
-                        <NavLink to="/intelligence" className="active">Intelligence</NavLink>
-                        <NavLink to="/cases">Cases</NavLink>
-                        <NavLink to="/audit">Audit & Metrics</NavLink>
-                        <NavLink to="/settings">Settings</NavLink>
-                    </nav>
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+                        const roleType = (user.roleType || "analyst").toLowerCase();
+                        return (
+                            <nav className="intel-topnav">
+                                <NavLink to="/dashboard">Dashboard</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/alerts">Alerts</NavLink>}
+                                <NavLink to="/incidents">Incidents</NavLink>
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/intelligence" className="active">Intelligence</NavLink>}
+                                {(roleType === "admin" || roleType === "analyst") && <NavLink to="/cases">Cases</NavLink>}
+                                {roleType === "admin" && <NavLink to="/audit">Audit & Metrics</NavLink>}
+                                {roleType === "admin" && <NavLink to="/settings">Settings</NavLink>}
+                            </nav>
+                        );
+                    })()}
                 </div>
                 <div className="intel-topbar-right">
                     <div className="intel-search">

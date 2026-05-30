@@ -3,7 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { LogOut, Settings } from "lucide-react";
 import { getCurrentUser, readSocUsers, roleLabelFromType, userDisplayName } from "../session";
 import { readSocProfile } from "../socProfile";
-import { getAlerts, getCases, getNotifications, setNotifications } from "../platformStore";
+import { getAlerts, getCases } from "../platformStore";
+import { getBackendNotifications, markAllNotificationsRead, markNotificationRead } from "../api/socService";
 import { formatTime } from "../utils/formatTime";
 import "../styles/socHeaderOverlays.css";
 
@@ -115,9 +116,20 @@ function groupKey(item) {
     return "general";
 }
 
+function normalizeNotification(item) {
+    return {
+        ...item,
+        text: item.title || item.body || "SOC notification",
+        read: !!item.is_read,
+        unread: !item.is_read,
+        at: item.created_at ? Date.parse(item.created_at) : Date.now(),
+        category: item.type || "general",
+    };
+}
+
 export function HeaderNotificationBell({ className, badgeClassName, children }) {
     const [open, setOpen] = useState(false);
-    const [items, setItems] = useState(() => getNotifications().map((x) => ({ ...x })));
+    const [items, setItems] = useState([]);
     const ref = useRef(null);
     const isUnread = (item) => item?.read !== true && item?.unread !== false;
     const unread = items.filter(isUnread).length;
@@ -133,7 +145,14 @@ export function HeaderNotificationBell({ className, badgeClassName, children }) 
         return GROUP_ORDER.map((k) => ({ key: k, title: GROUP_TITLES[k], list: m.get(k) || [] })).filter((x) => x.list.length);
     }, [items]);
 
-    const syncFromStore = () => setItems(getNotifications().map((x) => ({ ...x, category: x.category || "general" })));
+    const fetchNotifications = async () => {
+        try {
+            const rows = await getBackendNotifications({ per_page: 50 });
+            setItems((Array.isArray(rows) ? rows : []).map(normalizeNotification));
+        } catch (error) {
+            console.error("Failed to load notifications:", error);
+        }
+    };
 
     useEffect(() => {
         const fn = (e) => {
@@ -152,26 +171,36 @@ export function HeaderNotificationBell({ className, badgeClassName, children }) 
     }, [open]);
 
     useEffect(() => {
-        const onStore = () => syncFromStore();
+        fetchNotifications();
+        const interval = window.setInterval(fetchNotifications, 30000);
+        const onStore = () => fetchNotifications();
         window.addEventListener("soc_notifications_update", onStore);
         return () => {
+            window.clearInterval(interval);
             window.removeEventListener("soc_notifications_update", onStore);
         };
     }, []);
 
-    const persistItems = (next) => {
-        setItems(next);
-        setNotifications(next);
-    };
-
-    const markAsRead = (id) => {
-        persistItems(items.map((item) => (
-            item.id === id ? { ...item, read: true, unread: false } : item
+    const markAsRead = async (id) => {
+        setItems((prev) => prev.map((item) => (
+            item.id === id ? { ...item, read: true, unread: false, is_read: true } : item
         )));
+        try {
+            await markNotificationRead(id);
+        } catch (error) {
+            console.error("Failed to mark notification as read:", error);
+            fetchNotifications();
+        }
     };
 
-    const markAllRead = () => {
-        persistItems(items.map((item) => ({ ...item, read: true, unread: false })));
+    const markAllRead = async () => {
+        setItems((prev) => prev.map((item) => ({ ...item, read: true, unread: false, is_read: true })));
+        try {
+            await markAllNotificationsRead();
+        } catch (error) {
+            console.error("Failed to mark notifications as read:", error);
+            fetchNotifications();
+        }
     };
 
     return (
@@ -221,7 +250,7 @@ export function HeaderNotificationBell({ className, badgeClassName, children }) 
                         type="button"
                         style={itemStyle}
                         onClick={() => {
-                            persistItems([]);
+                            markAllRead();
                             setOpen(false);
                         }}
                     >
