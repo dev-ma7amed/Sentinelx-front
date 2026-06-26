@@ -1383,7 +1383,7 @@ export function executeUnifiedAction(action, payload = {}) {
             case "classify_incident": {
                 const { incidentId, classification, comment } = payload;
                 
-                apiClassifyIncident(incidentId, classification, "closed")
+                apiClassifyIncident(incidentId, classification, "closed", comment)
                     .then(() => syncWithBackend())
                     .catch((err) => console.error("Real classifyIncident failed:", err));
 
@@ -2496,10 +2496,18 @@ export async function syncWithBackend() {
         let cacheUpdated = false;
         
         const rawAlertsArray = Array.isArray(rawAlerts) ? rawAlerts : [];
-        const newAlertsToFetch = rawAlertsArray.filter(a => a.id && !mitreCache[a.id]);
+        const newAlertsToFetch = rawAlertsArray.filter(a => {
+            if (!a.id) return false;
+            const cached = mitreCache[a.id];
+            if (!cached) return true;
+            
+            const alertTitle = a.title || a.desc || a.description;
+            const alertType = a.alert_type || a.type;
+            return cached.title !== alertTitle || cached.alert_type !== alertType;
+        });
         
         if (newAlertsToFetch.length > 0 && (userRole === "admin" || userRole === "analyst")) {
-            console.log(`🔍 SentinelX: Fetching dynamic MITRE mappings for ${newAlertsToFetch.length} new alerts...`);
+            console.log(`🔍 SentinelX: Fetching dynamic MITRE mappings for ${newAlertsToFetch.length} new/updated alerts...`);
             const mitrePromises = newAlertsToFetch.map(async (a) => {
                 try {
                     const mRes = await getMitreMapping(a.id);
@@ -2516,7 +2524,12 @@ export async function syncWithBackend() {
             const results = await Promise.all(mitrePromises);
             results.forEach(r => {
                 if (r.mapping) {
-                    mitreCache[r.id] = r.mapping;
+                    const alert = rawAlertsArray.find(a => a.id === r.id);
+                    mitreCache[r.id] = {
+                        ...r.mapping,
+                        title: alert?.title || alert?.desc || alert?.description,
+                        alert_type: alert?.alert_type || alert?.type
+                    };
                     cacheUpdated = true;
                 }
             });
@@ -2554,27 +2567,34 @@ export async function syncWithBackend() {
         }
 
         if (Array.isArray(rawIncidents) && rawIncidents.length > 0) {
+            const existingIncidents = readJson(LS_INCIDENTS, []);
             const formattedIncidents = rawIncidents.map(i => {
                 const ip = i.dest_ip || i.attacker_ip || i.ip || "0.0.0.0";
                 const localAlerts = readJson(LS_ALERTS, []);
                 const incidentAlerts = localAlerts.filter(a => String(a.incidentId) === String(i.id) || String(a.incident_id) === String(i.id));
 
+                const existing = existingIncidents.find(ex => String(ex.id) === String(i.id));
+
                 // Inherit MITRE techniques from incident alerts
                 const mitreTechniques = [];
                 const seenMitre = new Set();
                 incidentAlerts.forEach(a => {
-                    if (a.mitre && a.mitre.id && !seenMitre.has(a.mitre.id)) {
-                        seenMitre.add(a.mitre.id);
-                        mitreTechniques.push(a.mitre);
+                    if (a.mitre) {
+                        const id = typeof a.mitre === "object" ? a.mitre.id : a.mitre;
+                        if (id && !seenMitre.has(id)) {
+                            seenMitre.add(id);
+                            mitreTechniques.push(typeof a.mitre === "object" ? a.mitre : { id, name: id });
+                        }
                     }
                 });
 
                 return {
+                    ...(existing || {}),
                     ...i,
                     id: String(i.id),
                     ip: ip,
                     srcIP: ip,
-                    alerts: incidentAlerts,
+                    alerts: incidentAlerts.length ? incidentAlerts : (existing?.alerts || i.alerts || []),
                     alertIds: incidentAlerts.map(a => a.id),
                     severity: i.severity || "medium",
                     status: i.status || "open",
@@ -2585,7 +2605,8 @@ export async function syncWithBackend() {
                     owner: i.assigned_to || i.owner || null,
                     assignedTo: i.assigned_to || i.assignedTo || null,
                     caseId: i.case_id || i.caseId || null,
-                    mitre: mitreTechniques.length ? mitreTechniques : (i.mitre || [])
+                    mitre: mitreTechniques.length ? mitreTechniques : (i.mitre || existing?.mitre || []),
+                    audit_logs: i.audit_logs || i.auditLogs || existing?.audit_logs || existing?.auditLogs || []
                 };
             });
             writeJson(LS_INCIDENTS, formattedIncidents);
@@ -2602,9 +2623,12 @@ export async function syncWithBackend() {
                 const mitreTechniques = [];
                 const seenMitre = new Set();
                 caseAlerts.forEach(a => {
-                    if (a.mitre && a.mitre.id && !seenMitre.has(a.mitre.id)) {
-                        seenMitre.add(a.mitre.id);
-                        mitreTechniques.push(a.mitre);
+                    if (a.mitre) {
+                        const id = typeof a.mitre === "object" ? a.mitre.id : a.mitre;
+                        if (id && !seenMitre.has(id)) {
+                            seenMitre.add(id);
+                            mitreTechniques.push(typeof a.mitre === "object" ? a.mitre : { id, name: id });
+                        }
                     }
                 });
 

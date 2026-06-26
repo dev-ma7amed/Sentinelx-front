@@ -6,13 +6,13 @@ import {
     PlusCircle, User, AlertTriangle, Clock, Archive,
     Shield, Link, AlertCircle, Zap, CheckCircle,
     RotateCcw, UserPlus, Share2, Flag, Trash2, Loader2,
-    Bold, Italic, List, Paperclip, History, FileText
+    Bold, Italic, List, Paperclip, History, FileText, UserMinus
 } from "lucide-react";
 import "../styles/cases.css";
 import ClassifyModal from "../components/Alerts/ClassifyModal";
 import { HeaderMenuAvatar, HeaderNotificationBell, HeaderSettingsNav } from "../components/MockHeaderMenu";
 import { SocLogo } from "../components/SocLogo";
-import { canMutate, getCurrentUser, logoutSession, userDisplayName } from "../session";
+import { canMutate, getCurrentUser, logoutSession, userDisplayName, isAdmin } from "../session";
 import { formatTime } from "../utils/formatTime";
 import { getCases, getIncidents, createCaseFromIncident, pushAudit, pushNotification, setCases, syncIncidentStatusWithCase, executeUnifiedAction, syncWithBackend } from "../platformStore";
 import { addAuditLog, AUDIT_ACTIONS, AUDIT_SEVERITY } from "../services/auditLogger";
@@ -53,6 +53,21 @@ function checkAndEscalateMaliciousIoc(caseItem) {
     }
 
     return escalated;
+}
+
+function mergeAuditLogs(prevLogs = [], newLogs = []) {
+    const combined = [...prevLogs, ...newLogs];
+    const unique = [];
+    const seen = new Set();
+    for (const item of combined) {
+        if (!item) continue;
+        const key = item.id || `${item.title}-${item.at}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(item);
+        }
+    }
+    return unique.sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
 function buildInitialAuditLog(caseItem) {
@@ -148,6 +163,9 @@ const buildCaseStateRow = (c) => {
 export default function Cases() {
     const navigate = useNavigate();
     const location = useLocation();
+
+    const meName = userDisplayName(getCurrentUser());
+    const meEmail = getCurrentUser()?.email || "";
     const [caseList, setCaseList] = useState(() => {
         const stored = getCases();
         return stored?.length ? stored : [];
@@ -264,21 +282,11 @@ export default function Cases() {
 
     const simulateResponse = (action) => {
         if (!canMutate()) return;
-        const critical = ["isolate", "kill_process", "disable_user"].includes(action);
-        if (critical) {
-            setAssignOpen(false);
-            setEscalateOpen(false);
-            setClassifyOpen(false);
-            setPendingAction(action);
-            setShowConfirm(true);
-            return;
-        }
         executeAction(action);
     };
 
-    const executeAction = (action) => {
-        if (!canMutate() || responseBusy) return;
-        setResponseBusy(action);
+    const executeAction = async (action) => {
+        if (!canMutate()) return;
         const map = {
             isolate: "Host isolated — containment applied",
             kill_process: "Malicious process terminated",
@@ -289,8 +297,24 @@ export default function Cases() {
             collect_logs: "Endpoint logs pulled for analysis",
             run_edr: "EDR scan initiated",
         };
-        addAudit(map[action] || action);
-        pushNotification(`${map[action] || action} — ${selectedCaseId}`, { category: "response" });
+        const analyst = userDisplayName(getCurrentUser());
+        const actionText = `${map[action] || action} by ${analyst}`;
+
+        try {
+            const api = await import("../api/socService");
+            await api.addCaseTimelineEvent(selectedCaseId, {
+                title: map[action] || action,
+                text: `Action performed by ${analyst}`,
+                type: "secondary"
+            });
+            pushNotification(`${map[action] || action} by ${analyst} — ${selectedCaseId}`, { category: "response" });
+            await syncWithBackend();
+        } catch (error) {
+            console.error("Failed to persist incident response action timeline event:", error);
+            addAudit(actionText);
+            pushNotification(`${map[action] || action} by ${analyst} — ${selectedCaseId}`, { category: "response" });
+        }
+
         if (action === "isolate") {
             updateSelectedCaseState((cur) => ({
                 ...cur,
@@ -329,7 +353,6 @@ export default function Cases() {
                 currentPhase: "Containment Phase",
             }));
         }
-        setTimeout(() => setResponseBusy(null), 450);
     };
 
     const handleResume = () => {
@@ -464,18 +487,29 @@ export default function Cases() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCaseId, slaRunning]);
 
-    const handleSaveNote = () => {
+    const handleSaveNote = async () => {
         if (!canMutate() || saveNoteBusy) return;
         const t = (noteDraft || "").trim();
         if (!t) return;
         setSaveNoteBusy(true);
-        updateSelectedCaseState((cur) => ({
-            ...cur,
-            noteDraft: "",
-            lastSavedAt: new Date(),
-        }));
-        addAudit("Analyst Note", "secondary", <>{t}</>);
-        setSaveNoteBusy(false);
+        try {
+            const api = await import("../api/socService");
+            await api.addCaseNote(selectedCaseId, t);
+
+            updateSelectedCaseState((cur) => ({
+                ...cur,
+                noteDraft: "",
+                lastSavedAt: new Date(),
+            }));
+            pushNotification(`Note successfully added and persisted to Case ${selectedCaseId}`);
+            
+            await syncWithBackend();
+        } catch (error) {
+            console.error("Failed to save note:", error);
+            pushNotification(`Error saving note: ${error.message || error}`);
+        } finally {
+            setSaveNoteBusy(false);
+        }
     };
 
     const handleCloseCase = () => {
@@ -523,11 +557,6 @@ export default function Cases() {
                 archived: true,
             }));
 
-            addAudit(
-                `Case closed — ${label}`,
-                "primary",
-                comment && comment.trim() ? <>{comment}</> : null
-            );
             pushNotification(`Case ${selectedCaseId} classified: ${label}`);
             await syncWithBackend();
         }
@@ -535,13 +564,21 @@ export default function Cases() {
         setClassifyOpen(false);
     };
 
-    const handleAssignSubmit = () => {
+    const handleAssignSubmit = async () => {
         if (assignSubmitBusy) return;
         setAssignSubmitBusy(true);
         const target = (assignTarget || "").trim() || userDisplayName(getCurrentUser());
         const cu = userDisplayName(getCurrentUser()).trim();
         const em = (getCurrentUser()?.email || "").trim();
         const isMine = target === cu || (!!em && target === em) || target.includes(cu);
+
+        if (!isAdmin() && !isMine) {
+            pushNotification("Non-admin users can only assign cases to themselves.");
+            setAssignOpen(false);
+            setAssignSubmitBusy(false);
+            return;
+        }
+
         const prevResolved = resolveAssign(selectedState.assignedTo);
         if (prevResolved === target) {
             setAssignOpen(false);
@@ -549,38 +586,94 @@ export default function Cases() {
             return;
         }
 
-        const result = executeUnifiedAction("assign_case", {
-            caseId: selectedCaseId,
-            assignedTo: target,
-            analyst: userDisplayName(getCurrentUser()),
-        });
-
-        if (result) {
-            // Update caseList with new assignment and persist to store
-            const next = caseList.map((c) =>
-                c.id === selectedCaseId
-                    ? {
-                        ...c,
-                        assignedTo: target,
-                        isMine,
-                    }
-                    : c
-            );
-            persistCaseList(next);
-
-            // Update local state
-            updateSelectedCaseState((cur) => ({
-                ...cur,
+        try {
+            const result = executeUnifiedAction("assign_case", {
+                caseId: selectedCaseId,
                 assignedTo: target,
-                isMine,
-            }));
+                analyst: userDisplayName(getCurrentUser()),
+            });
 
-            addAudit(`Reassigned to ${target}`);
-            pushNotification(`Case ${selectedCaseId} assigned to ${target}`);
+            if (result) {
+                // Update caseList with new assignment and persist to store
+                const next = caseList.map((c) =>
+                    c.id === selectedCaseId
+                        ? {
+                            ...c,
+                            assignedTo: target,
+                            isMine,
+                        }
+                        : c
+                );
+                persistCaseList(next);
+
+                // Update local state
+                updateSelectedCaseState((cur) => ({
+                    ...cur,
+                    assignedTo: target,
+                    isMine,
+                }));
+
+                pushNotification(`Case ${selectedCaseId} assigned to ${target}`);
+                await syncWithBackend();
+            }
+        } catch (error) {
+            console.error("Assignment failed:", error);
+            pushNotification(`Assignment failed: ${error.message || error}`);
+        } finally {
+            setAssignOpen(false);
+            setAssignSubmitBusy(false);
         }
+    };
 
-        setAssignOpen(false);
-        setAssignSubmitBusy(false);
+    const handleReleaseCase = () => {
+        if (!canMutate()) return;
+        
+        Swal.fire({
+            title: 'Release Case?',
+            text: "This will set the case status back to Unassigned and allow other analysts to claim it.",
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#3085d6',
+            cancelButtonColor: '#d33',
+            confirmButtonText: 'Yes, release it!',
+            background: '#151f32',
+            color: '#fff'
+        }).then(async (res) => {
+            if (res.isConfirmed) {
+                try {
+                    const actionResult = executeUnifiedAction("assign_case", {
+                        caseId: selectedCaseId,
+                        assignedTo: "Unassigned",
+                        analyst: userDisplayName(getCurrentUser()),
+                    });
+
+                    if (actionResult) {
+                        const next = caseList.map((c) =>
+                            c.id === selectedCaseId
+                                ? {
+                                    ...c,
+                                    assignedTo: "Unassigned",
+                                    isMine: false,
+                                }
+                                : c
+                        );
+                        persistCaseList(next);
+
+                        updateSelectedCaseState((cur) => ({
+                            ...cur,
+                            assignedTo: "Unassigned",
+                            isMine: false,
+                        }));
+
+                        pushNotification(`Case ${selectedCaseId} has been released (unassigned)`);
+                        await syncWithBackend();
+                    }
+                } catch (error) {
+                    console.error("Failed to release case:", error);
+                    pushNotification(`Failed to release case: ${error.message || error}`);
+                }
+            }
+        });
     };
 
     const handleEscalateSubmit = () => {
@@ -624,8 +717,8 @@ export default function Cases() {
                 currentPhase: "Investigation Phase",
             }));
 
-            addAudit(`Escalated to ${escalateLevel} / ${escalateAssignee}: ${reason}`, "secondary");
             pushNotification(`Case ${selectedCaseId} escalated to ${escalateLevel}`);
+            syncWithBackend().catch(err => console.error("Sync after escalation failed:", err));
         }
 
         setEscalateOpen(false);
@@ -912,7 +1005,7 @@ export default function Cases() {
                         assignedTo: c.assignedTo, 
                         isMine: c.isMine, 
                         priority: c.priority,
-                        auditLog: buildInitialAuditLog(c).map((x) => ({ ...x, id: x.id }))
+                        auditLog: mergeAuditLogs(prev[c.id].auditLog || [], buildInitialAuditLog(c)).map((x) => ({ ...x, id: x.id }))
                       }
                     : buildCaseStateRow(c);
             });
@@ -943,7 +1036,7 @@ export default function Cases() {
                             assignedTo: c.assignedTo,
                             isMine: c.isMine,
                             priority: c.priority,
-                            auditLog: buildInitialAuditLog(c).map((x) => ({ ...x, id: x.id }))
+                            auditLog: mergeAuditLogs(prev[c.id].auditLog || [], buildInitialAuditLog(c)).map((x) => ({ ...x, id: x.id }))
                         }
                         : buildCaseStateRow(c);
                 });
@@ -1028,7 +1121,7 @@ export default function Cases() {
                 return;
             }
 
-            const storedCases = JSON.parse(localStorage.getItem("cases")) || [];
+            const storedCases = getCases();
 
             const updatedCases = storedCases.map((c) => {
                 if (c.id === selectedCase.id) {
@@ -1048,7 +1141,7 @@ export default function Cases() {
                 return c;
             });
 
-            localStorage.setItem("cases", JSON.stringify(updatedCases));
+            setCases(updatedCases);
 
             const updatedSelectedCase = {
                 ...selectedCase,
@@ -1197,6 +1290,10 @@ export default function Cases() {
                                 selectedCase ? (
                                     (() => {
                                         const isCaseUnassigned = !selectedCase.assignedTo || selectedCase.assignedTo === "Unassigned" || selectedCase.assignedTo === "";
+                                        const isSharedWithMe = selectedCase.sharedWith && selectedCase.sharedWith.some(s => 
+                                            (s.user || "").trim().toLowerCase() === meName.toLowerCase() ||
+                                            (meEmail && (s.user || "").trim().toLowerCase() === meEmail.toLowerCase())
+                                        );
                                         return (
                                             <div className={`cases-list-item active`}>
                                                 <FolderOpen size={18} className="cases-list-icon active" />
@@ -1218,6 +1315,21 @@ export default function Cases() {
                                                                 Unassigned
                                                             </span>
                                                         )}
+                                                        {isSharedWithMe && (
+                                                            <span className="cases-shared-badge" style={{
+                                                                fontSize: "9px",
+                                                                fontWeight: "bold",
+                                                                textTransform: "uppercase",
+                                                                color: "#10b981",
+                                                                border: "1px dashed rgba(16, 185, 129, 0.4)",
+                                                                padding: "1px 4px",
+                                                                borderRadius: "3px",
+                                                                background: "rgba(16, 185, 129, 0.05)",
+                                                                lineHeight: "1"
+                                                            }}>
+                                                                Shared
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <span>{selectedCase.title}</span>
                                                 </div>
@@ -1230,6 +1342,10 @@ export default function Cases() {
                                 )
                             ) : filteredCases.slice((casePage - 1) * 10, casePage * 10).map((c) => {
                                 const isCaseUnassigned = !c.assignedTo || c.assignedTo === "Unassigned" || c.assignedTo === "";
+                                const isSharedWithMe = c.sharedWith && c.sharedWith.some(s => 
+                                    (s.user || "").trim().toLowerCase() === meName.toLowerCase() ||
+                                    (meEmail && (s.user || "").trim().toLowerCase() === meEmail.toLowerCase())
+                                );
                                 return (
                                     <div
                                         key={c.id}
@@ -1256,6 +1372,21 @@ export default function Cases() {
                                                         lineHeight: "1"
                                                     }}>
                                                         Unassigned
+                                                    </span>
+                                                )}
+                                                {isSharedWithMe && (
+                                                    <span className="cases-shared-badge" style={{
+                                                        fontSize: "9px",
+                                                        fontWeight: "bold",
+                                                        textTransform: "uppercase",
+                                                        color: "#10b981",
+                                                        border: "1px dashed rgba(16, 185, 129, 0.4)",
+                                                        padding: "1px 4px",
+                                                        borderRadius: "3px",
+                                                        background: "rgba(16, 185, 129, 0.05)",
+                                                        lineHeight: "1"
+                                                    }}>
+                                                        Shared
                                                     </span>
                                                 )}
                                             </div>
@@ -1440,38 +1571,17 @@ export default function Cases() {
                             <div className="cases-response-card">
                                 <p className="cases-card-title text-red">Containment</p>
                                 <div className="cases-card-btns">
-                                    <button className="cases-action-btn" onClick={() => simulateResponse("isolate")} disabled={!canMutate() || !!responseBusy} style={responseBusy === "isolate" ? { opacity: 0.65 } : undefined}>{responseBusy === "isolate" ? <Loader2 size={12} style={{ marginRight: 6, verticalAlign: "middle", animation: "cases-spin 0.8s linear infinite" }} /> : null}Isolate Host</button>
-                                    <button
-                                        className="cases-action-btn"
-                                        onClick={() => simulateResponse("kill_process")}
-                                        disabled={!canMutate() || !!responseBusy || !getResponseFromMitre(mitre).includes("kill_process")}
-                                        style={responseBusy === "kill_process" ? { opacity: 0.65 } : undefined}
-                                    >
-                                        {responseBusy === "kill_process" ? <Loader2 size={12} style={{ marginRight: 6, verticalAlign: "middle", animation: "cases-spin 0.8s linear infinite" }} /> : null}Kill Process
-                                    </button>
-                                    <button className="cases-action-btn" onClick={() => simulateResponse("disable_user")} disabled={!canMutate() || !!responseBusy} style={responseBusy === "disable_user" ? { opacity: 0.65 } : undefined}>{responseBusy === "disable_user" ? <Loader2 size={12} style={{ marginRight: 6, verticalAlign: "middle", animation: "cases-spin 0.8s linear infinite" }} /> : null}Disable User</button>
+                                    <button className="cases-action-btn" onClick={() => simulateResponse("isolate")} disabled={!canMutate()}>Isolate Host</button>
+                                    <button className="cases-action-btn" onClick={() => simulateResponse("kill_process")} disabled={!canMutate()}>Kill Process</button>
+                                    <button className="cases-action-btn" onClick={() => simulateResponse("disable_user")} disabled={!canMutate()}>Disable User</button>
                                 </div>
                             </div>
 
                             <div className="cases-response-card">
                                 <p className="cases-card-title text-yellow">Network</p>
                                 <div className="cases-card-btns">
-                                    <button
-                                        className="cases-action-btn"
-                                        onClick={() => simulateResponse("block_ip")}
-                                        disabled={!canMutate() || !!responseBusy || !getResponseFromMitre(mitre).includes("block_ip")}
-                                        style={responseBusy === "block_ip" ? { opacity: 0.65 } : undefined}
-                                    >
-                                        {responseBusy === "block_ip" ? <Loader2 size={12} style={{ marginRight: 6, verticalAlign: "middle", animation: "cases-spin 0.8s linear infinite" }} /> : null}Block IP
-                                    </button>
-                                    <button
-                                        className="cases-action-btn"
-                                        onClick={() => simulateResponse("block_domain")}
-                                        disabled={!canMutate() || !!responseBusy || !getResponseFromMitre(mitre).includes("block_domain")}
-                                        style={responseBusy === "block_domain" ? { opacity: 0.65 } : undefined}
-                                    >
-                                        {responseBusy === "block_domain" ? <Loader2 size={12} style={{ marginRight: 6, verticalAlign: "middle", animation: "cases-spin 0.8s linear infinite" }} /> : null}Block Domain
-                                    </button>
+                                    <button className="cases-action-btn" onClick={() => simulateResponse("block_ip")} disabled={!canMutate()}>Block IP</button>
+                                    <button className="cases-action-btn" onClick={() => simulateResponse("block_domain")} disabled={!canMutate()}>Block Domain</button>
                                 </div>
                             </div>
 
@@ -1562,7 +1672,14 @@ export default function Cases() {
                                     setAssignOpen(true);
                                 },
                             },
-                            { icon: <Share2 size={20} />, label: "Share", onClick: () => setShareModalOpen(true) },
+                            // Only show Release if case is currently assigned and not closed
+                            ...(selectedState.assignedTo && selectedState.assignedTo !== "Unassigned" && selectedState.assignedTo !== "" && selectedState.currentStatus !== "Closed" ? [
+                                { icon: <UserMinus size={20} />, label: "Release", onClick: handleReleaseCase }
+                            ] : []),
+                            // Only show Share if case is assigned to current user (me)
+                            ...(selectedState.assignedTo === userDisplayName(getCurrentUser()) || selectedState.isMine ? [
+                                { icon: <Share2 size={20} />, label: "Share", onClick: () => setShareModalOpen(true) }
+                            ] : []),
                             {
                                 icon: <Flag size={20} />,
                                 label: "Escalate",
@@ -1761,9 +1878,13 @@ export default function Cases() {
                             <option value={userDisplayName(getCurrentUser())}>
                                 {userDisplayName(getCurrentUser())}
                             </option>
-                            <option value="Alex Wright">Alex Wright</option>
-                            <option value="Jordan Lee">Jordan Lee</option>
-                            <option value="SOC Lead">SOC Lead</option>
+                            {isAdmin() && (
+                                <>
+                                    <option value="Alex Wright">Alex Wright</option>
+                                    <option value="Jordan Lee">Jordan Lee</option>
+                                    <option value="SOC Lead">SOC Lead</option>
+                                </>
+                            )}
                         </select>
                         <div className="cases-modal-btns" style={{ marginTop: 16 }}>
                             <button className="cases-modal-cancel" onClick={() => setAssignOpen(false)} type="button">

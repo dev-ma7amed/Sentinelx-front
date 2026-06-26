@@ -34,6 +34,44 @@ function normalizeAlert(a) {
       : a.date && a.time
       ? `${a.date}T${a.time}Z`
       : new Date().toISOString();
+
+  const dateObj = new Date(createdAt);
+  let date = a.date;
+  let time = a.time;
+  let timeAgo = a.timeAgo;
+
+  if (!date || !time) {
+    if (!Number.isNaN(dateObj.getTime())) {
+      const year = dateObj.getFullYear();
+      const month = String(dateObj.getMonth() + 1).padStart(2, "0");
+      const day = String(dateObj.getDate()).padStart(2, "0");
+      date = `${year}-${month}-${day}`;
+
+      const hours = String(dateObj.getHours()).padStart(2, "0");
+      const minutes = String(dateObj.getMinutes()).padStart(2, "0");
+      const seconds = String(dateObj.getSeconds()).padStart(2, "0");
+      time = `${hours}:${minutes}:${seconds}`;
+    }
+  }
+
+  if (!timeAgo && !Number.isNaN(dateObj.getTime())) {
+    const diffMs = Date.now() - dateObj.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+    if (diffMin < 1) {
+      timeAgo = "just now";
+    } else if (diffMin < 60) {
+      timeAgo = `${diffMin}m ago`;
+    } else {
+      const diffHours = Math.round(diffMin / 60);
+      if (diffHours < 24) {
+        timeAgo = `${diffHours}h ago`;
+      } else {
+        const diffDays = Math.round(diffHours / 24);
+        timeAgo = `${diffDays}d ago`;
+      }
+    }
+  }
+
   const mitre = a.mitre || detectMitre(a);
   const srcKey = a.srcIP || a?.data?.srcip || "unknown";
   const correlationId = a.correlationId || `corr-${String(srcKey).replace(/\./g, "-")}`;
@@ -76,6 +114,9 @@ function normalizeAlert(a) {
     mitre,
     correlationId,
     incidentId,
+    date,
+    time,
+    timeAgo,
   };
 }
 
@@ -130,9 +171,12 @@ export function generateIncidents(alerts) {
     const mitreTechniques = [];
     const seenMitre = new Set();
     list.forEach((a) => {
-      if (a.mitre && !seenMitre.has(a.mitre.id)) {
-        seenMitre.add(a.mitre.id);
-        mitreTechniques.push(a.mitre);
+      if (a.mitre) {
+        const id = typeof a.mitre === "object" ? a.mitre.id : a.mitre;
+        if (id && !seenMitre.has(id)) {
+          seenMitre.add(id);
+          mitreTechniques.push(typeof a.mitre === "object" ? a.mitre : { id, name: id });
+        }
       }
     });
 

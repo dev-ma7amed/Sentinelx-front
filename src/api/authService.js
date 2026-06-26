@@ -7,8 +7,12 @@ import { apiPost, apiGet, apiPut, setAuthToken, clearAuthToken } from "./client"
  */
 export async function loginUser(email, password) {
     const res = await apiPost("v1/auth/login", { email, password });
-    // ApiResponse format: { status, message, data: { session_id, otp } }
-    return res.data || res;
+    // ApiResponse format: { status, message, data: { session_id, otp, token, user } }
+    const responseData = res.data || res;
+    if (responseData && responseData.token) {
+        setAuthToken(responseData.token);
+    }
+    return responseData;
 }
 
 /**

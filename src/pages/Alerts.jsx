@@ -32,6 +32,7 @@ import {
     pushNotification,
     getIncidents,
     upsertIncident,
+    syncWithBackend,
 } from "../platformStore";
 import { assignAlert, escalateAlert, getAlerts, getSeverityCounts, investigateAlert, updateAlert } from "../store/socStore";
 import "../styles/Alerts.css";
@@ -122,25 +123,66 @@ export default function Alerts({ view } = {}) {
     const navigate = useNavigate();
     const [search, setSearch] = useState("");
     const [hoveredId, setHoveredId] = useState(null);
-    const [activeView, setActiveView] = useState("all");
+    const [activeView, setActiveView] = useState(() => localStorage.getItem("alerts_activeView") || "all");
     const [masterAlerts, setMasterAlerts] = useState([]);
     const [loadingAlerts, setLoadingAlerts] = useState(false);
     const [alertsError, setAlertsError] = useState("");
     const [rowActionBusy, setRowActionBusy] = useState(null);
-    const [sortBy, setSortBy] = useState("newest");
+    const [sortBy, setSortBy] = useState(() => localStorage.getItem("alerts_sortBy") || "newest");
 
     const location = useLocation();
     const mode = view || (location.pathname === "/logs" ? "logs" : "alerts");
 
     // Pending filters (what user selects), applied filters (what table uses).
-    const [pendingSource, setPendingSource] = useState("all");
-    const [pendingSeverity, setPendingSeverity] = useState("all");
-    const [pendingTime, setPendingTime] = useState("all");
-    const [appliedSource, setAppliedSource] = useState("all");
-    const [appliedSeverity, setAppliedSeverity] = useState("all");
-    const [appliedTime, setAppliedTime] = useState("all");
+    const [pendingSource, setPendingSource] = useState(() => localStorage.getItem("alerts_pendingSource") || "all");
+    const [pendingSeverity, setPendingSeverity] = useState(() => localStorage.getItem("alerts_pendingSeverity") || "all");
+    const [pendingTime, setPendingTime] = useState(() => localStorage.getItem("alerts_pendingTime") || "all");
+    const [appliedSource, setAppliedSource] = useState(() => localStorage.getItem("alerts_appliedSource") || "all");
+    const [appliedSeverity, setAppliedSeverity] = useState(() => localStorage.getItem("alerts_appliedSeverity") || "all");
+    const [appliedTime, setAppliedTime] = useState(() => localStorage.getItem("alerts_appliedTime") || "all");
     const [alertPage, setAlertPage] = useState(1);
     const [logPage, setLogPage] = useState(1);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_activeView", activeView);
+    }, [activeView]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_sortBy", sortBy);
+    }, [sortBy]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_pendingSource", pendingSource);
+    }, [pendingSource]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_pendingSeverity", pendingSeverity);
+    }, [pendingSeverity]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_pendingTime", pendingTime);
+    }, [pendingTime]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_appliedSource", appliedSource);
+    }, [appliedSource]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_appliedSeverity", appliedSeverity);
+    }, [appliedSeverity]);
+
+    useEffect(() => {
+        localStorage.setItem("alerts_appliedTime", appliedTime);
+    }, [appliedTime]);
+
+    useEffect(() => {
+        // Auto-refresh alerts every 30 seconds
+        const timer = setInterval(() => {
+            console.log("Auto-refreshing alerts via background sync...");
+            syncWithBackend().catch(err => console.error("Auto-refresh sync failed:", err));
+        }, 30000);
+        return () => clearInterval(timer);
+    }, []);
 
     const SOURCE_KEYS = useMemo(() => ["all", "Wazuh", "Sysmon", "Suricata", "Network ML"], []);
     const SEVERITY_KEYS = useMemo(() => ["all", "highcrit", "critical", "high", "medium", "low"], []);
@@ -224,8 +266,8 @@ export default function Alerts({ view } = {}) {
             const filtered = filterByApplied(masterAlerts);
             const sorted = [...filtered];
             sorted.sort((a, b) => {
-                const timeA = a.createdAt ? Date.parse(a.createdAt) : 0;
-                const timeB = b.createdAt ? Date.parse(b.createdAt) : 0;
+                const timeA = alertTimeMs(a);
+                const timeB = alertTimeMs(b);
                 if (sortBy === "oldest") {
                     return timeA - timeB;
                 } else {

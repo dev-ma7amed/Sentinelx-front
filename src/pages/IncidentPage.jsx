@@ -101,6 +101,8 @@ export default function IncidentPage() {
     const autoEscalateRef = useRef(false);
     const sourceAlert = location.state?.alertId || null;
     const [incident, setIncident] = useState(null);
+    const isLive = typeof window !== "undefined" && !!(localStorage.getItem("auth_token") || localStorage.getItem("isAuthToken"));
+    const [loadingDetail, setLoadingDetail] = useState(isLive);
     const incidents = useMemo(() => getIncidents(), [storeTick]);
 
     const relatedAlerts = useMemo(() => (incident?.alerts || []), [incident]);
@@ -193,7 +195,12 @@ export default function IncidentPage() {
         if (fromAlert) {
             const foundByAlert = list.find((row) => Array.isArray(row.alertIds) && row.alertIds.includes(fromAlert));
             if (foundByAlert) {
-                setIncident(foundByAlert);
+                setIncident(prev => {
+                    if (prev && String(prev.id) === String(foundByAlert.id)) {
+                        return { ...prev, ...foundByAlert, alerts: prev.alerts || foundByAlert.alerts || [], alertIds: prev.alertIds || foundByAlert.alertIds || [], audit_logs: prev.audit_logs || foundByAlert.audit_logs || [] };
+                    }
+                    return foundByAlert;
+                });
                 return;
             }
         }
@@ -225,79 +232,97 @@ export default function IncidentPage() {
         } else {
             hydrateRetryRef.current = false;
         }
-        setIncident(found || null);
+        setIncident(prev => {
+            if (!found) return null;
+            if (prev && String(prev.id) === String(found.id)) {
+                return { ...prev, ...found, alerts: prev.alerts || found.alerts || [], alertIds: prev.alertIds || found.alertIds || [], audit_logs: prev.audit_logs || found.audit_logs || [] };
+            }
+            return found;
+        });
     }, [alertId, id, incidents, location.state, navigate, sourceAlert]);
 
     // ── Fetch Incident from real backend API ──────────────────────────────────────
     useEffect(() => {
-        if (!id) return;
+        if (!id) {
+            setLoadingDetail(false);
+            return;
+        }
 
         let isMounted = true;
         const fetchDetail = async () => {
+            setLoadingDetail(true);
             try {
                 const api = await import("../api/socService");
                 const res = await api.getIncidentDetail(id);
-                if (!isMounted || !res) return;
+                if (!isMounted) return;
+                if (res) {
+                    console.log("Fetched active incident detail from DB:", res);
 
-                console.log("Fetched active incident detail from DB:", res);
+                    // Map database columns to frontend expectations
+                    const mappedAlerts = (res.alerts || []).map(a => ({
+                        ...a,
+                        id: String(a.id),
+                        srcIP: a.src_ip || a.srcip || "0.0.0.0",
+                        dstIP: a.dest_ip || a.destip || "0.0.0.0",
+                        desc: a.title || a.description || a.desc || "Security Event Alert",
+                        type: a.alert_type || a.type || "Security Event Alert",
+                        sub: a.sub || "",
+                        createdAt: a.alerted_at || a.created_at || a.createdAt || new Date().toISOString(),
+                        assignedTo: a.assigned_to || a.assignedTo || null,
+                        incidentId: String(a.incident_id || a.incidentId || ""),
+                        status: a.status || "new",
+                        severity: a.severity || "medium"
+                    }));
 
-                // Map database columns to frontend expectations
-                const mappedAlerts = (res.alerts || []).map(a => ({
-                    ...a,
-                    id: String(a.id),
-                    srcIP: a.src_ip || a.srcip || "0.0.0.0",
-                    dstIP: a.dest_ip || a.destip || "0.0.0.0",
-                    desc: a.title || a.description || a.desc || "Security Event Alert",
-                    type: a.alert_type || a.type || "Security Event Alert",
-                    sub: a.sub || "",
-                    createdAt: a.alerted_at || a.created_at || a.createdAt || new Date().toISOString(),
-                    assignedTo: a.assigned_to || a.assignedTo || null,
-                    incidentId: String(a.incident_id || a.incidentId || ""),
-                    status: a.status || "new",
-                    severity: a.severity || "medium"
-                }));
+                    const mappedIncident = {
+                        ...res,
+                        id: String(res.id),
+                        ip: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
+                        srcIP: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
+                        status: res.status || "open",
+                        severity: res.severity || "medium",
+                        correlationScore: Number(res.correlation_score || res.correlationScore || 0),
+                        owner: res.case?.assigned_to || res.assigned_to || res.owner || "Unassigned",
+                        assignedTo: res.case?.assigned_to || res.assigned_to || res.assignedTo || "Unassigned",
+                        caseId: res.case_id || res.case?.id || null,
+                        alerts: mappedAlerts,
+                        alertIds: mappedAlerts.map(a => a.id),
+                        audit_logs: res.audit_logs || res.auditLogs || []
+                    };
 
-                const mappedIncident = {
-                    ...res,
-                    id: String(res.id),
-                    ip: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
-                    srcIP: res.dest_ip || res.attacker_ip || res.ip || "0.0.0.0",
-                    status: res.status || "open",
-                    severity: res.severity || "medium",
-                    correlationScore: Number(res.correlation_score || res.correlationScore || 0),
-                    owner: res.case?.assigned_to || res.assigned_to || res.owner || "Unassigned",
-                    assignedTo: res.case?.assigned_to || res.assigned_to || res.assignedTo || "Unassigned",
-                    caseId: res.case_id || res.case?.id || null,
-                    alerts: mappedAlerts,
-                    alertIds: mappedAlerts.map(a => a.id),
-                    audit_logs: res.audit_logs || res.auditLogs || []
-                };
-
-                // Upsert to local store
-                upsertIncident(mappedIncident);
-                
-                // Set directly into state so it's instantaneous!
-                setIncident(mappedIncident);
+                    // Upsert to local store
+                    upsertIncident(mappedIncident);
+                    
+                    // Set directly into state so it's instantaneous!
+                    setIncident(mappedIncident);
+                }
             } catch (err) {
                 console.error("Error fetching incident detail:", err);
+            } finally {
+                if (isMounted) {
+                    setLoadingDetail(false);
+                }
             }
         };
 
         fetchDetail();
+        return () => {
+            isMounted = false;
+        };
     }, [id]);
 
     // ── Timeline build ─────────────────────────────────────────────────────────
     useEffect(() => {
         if (!incident) { setTimelineItems([]); return; }
-        const next = relatedAlerts
-            .slice()
-            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+        
+        const alertItems = relatedAlerts
             .map((a) => {
                 const stage = detectStage(a);
                 const color = a.severity === "critical" ? "red" : a.severity === "high" ? "amber" : a.severity === "medium" ? "blue" : "gray";
                 const icon = a.source === "Wazuh" ? <Terminal size={14} /> : a.source === "Sysmon" ? <Cpu size={14} /> : <Network size={14} />;
                 return {
-                    id: a.id,
+                    id: `alert-${a.id}`,
+                    timestamp: new Date(a.createdAt || new Date()),
                     title: a.desc,
                     badge: String(a.severity || "low").toUpperCase(),
                     badgeColor: a.severity === "critical" ? "red" : a.severity === "high" ? "amber" : "blue",
@@ -315,7 +340,28 @@ export default function IncidentPage() {
                         : [],
                 };
             });
-        setTimelineItems(next);
+
+        const logs = (incident.audit_logs || incident.auditLogs || [])
+            .filter((log) => String(log.type).toUpperCase() !== "CORRELATE");
+        const logItems = logs.map((log) => {
+            const isNote = String(log.type).toUpperCase() === "NOTE";
+            return {
+                id: `log-${log.id || Date.now() + Math.random()}`,
+                timestamp: new Date(log.created_at || log.createdAt || new Date()),
+                title: isNote ? "Investigator Note" : log.message,
+                desc: isNote ? log.message : null,
+                badge: String(log.type || "audit").toUpperCase(),
+                badgeColor: isNote ? "blue" : "gray",
+                time: formatTime(log.created_at || log.createdAt || new Date()),
+                source: "Analyst",
+                color: isNote ? "blue" : "gray",
+                icon: isNote ? <User size={14} /> : <CheckCircle size={14} />,
+                actions: [],
+            };
+        });
+
+        const merged = [...alertItems, ...logItems].sort((a, b) => a.timestamp - b.timestamp);
+        setTimelineItems(merged);
     }, [incident, relatedAlerts]);
 
     // ── Auto escalation + case creation ───────────────────────────────────────────────────────
@@ -385,7 +431,12 @@ export default function IncidentPage() {
     // ── Derived intel ──────────────────────────────────────────────────────────
     const mitreTechniques = useMemo(() => {
         if (Array.isArray(incident?.mitre) && incident.mitre.length) {
-            return [...new Set(incident.mitre)].slice(0, 3).map((id) => ({ id, name: id }));
+            return [...new Set(incident.mitre)].slice(0, 3).map((item) => {
+                if (item && typeof item === "object") {
+                    return { id: item.id || item.technique_id, name: item.name || item.technique || item.id };
+                }
+                return { id: item, name: item };
+            });
         }
         const seen = new Set();
         const techniques = [];
@@ -548,13 +599,14 @@ export default function IncidentPage() {
         setNoteBusy(true);
 
         try {
-            const caseId = incident?.caseId || (linkedCase && linkedCase.id);
+            const caseId = incident?.caseId;
+            const api = await import("../api/socService");
             if (caseId) {
-                const api = await import("../api/socService");
                 await api.addCaseNote(caseId, t);
                 pushNotification(`Note added to Case ${caseId}`);
             } else {
-                pushTimelineEntry({ id: `note-${Date.now()}`, color: "blue", icon: <User size={14} />, title: "Investigator Note", badge: "NOTE", badgeColor: "blue", time: currentTime(), source: meName, actions: null, desc: t });
+                await api.addIncidentNote(incident.id, t);
+                pushNotification(`Note added to Incident ${incident.id}`);
             }
 
             logAction("investigate_incident", { incidentId: incident?.id, analyst: meName, message: `Added investigation note: ${t}` });
@@ -562,6 +614,7 @@ export default function IncidentPage() {
             
             // Re-trigger backend detail fetch & sync!
             setStoreTick((tick) => tick + 1);
+            await syncWithBackend();
         } catch (error) {
             console.error("Failed to add investigator note:", error);
             pushNotification(`Error adding note: ${error.message}`, { category: "incident" });
@@ -737,6 +790,18 @@ export default function IncidentPage() {
             pushTimelineEntry({ id: `scan-${Date.now()}`, color: "amber", icon: <Terminal size={14} />, title: "Process Scan Complete", badge: "HOST", badgeColor: "amber", time: currentTime(), source: "Sysmon", actions: null });
         }, 1200);
     };
+
+    if (loadingDetail) {
+        return (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#0b0f19", color: "#92b7c9", fontFamily: "sans-serif" }}>
+                <div style={{ textAlign: "center" }}>
+                    <div style={{ border: "4px solid rgba(43, 173, 238, 0.1)", borderTop: "4px solid #2badee", borderRadius: "50%", width: "40px", height: "40px", animation: "spin 1s linear infinite", margin: "0 auto 16px" }} />
+                    <p style={{ fontSize: "16px", fontWeight: "500" }}>Loading Incident Details...</p>
+                    <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+                </div>
+            </div>
+        );
+    }
 
     if (incident && alertId && !baseAlert && !(Array.isArray(incident.alertIds) && incident.alertIds.includes(alertId))) {
         return <div>No Incident Data</div>;
@@ -1171,7 +1236,7 @@ export default function IncidentPage() {
                                             type="button"
                                             className="inc-fp-btn"
                                             onClick={() => { setClassifyInitial("tp"); setClassifyOpen(true); }}
-                                            disabled={!canMutate() || incidentStatusValue === "closed"}
+                                            disabled={!canMutate()}
                                             title=""
                                         >
                                             Classify Incident

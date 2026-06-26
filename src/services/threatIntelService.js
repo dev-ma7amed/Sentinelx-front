@@ -174,13 +174,16 @@ export async function enrichIP(ip, force = false) {
     if (!force) {
         const cached = getCached(ip);
         if (cached) return cached;
+    } else {
+        clearIntelCache();
     }
 
     console.log("🔍 Securing Enrichment for IP via SentinelX Backend API:", ip);
 
     try {
         // Fetch from actual backend endpoint
-        const res = await apiGet(`v1/intelligence/enrich/${encodeURIComponent(ip)}`);
+        const url = `v1/intelligence/enrich/${encodeURIComponent(ip)}` + (force ? "?force=true" : "");
+        const res = await apiGet(url);
 
         // The API returns wrapped response: { status: 200, message: null, data: { ... } }
         const data = res.data || res;
@@ -195,23 +198,45 @@ export async function enrichIP(ip, force = false) {
 
         // If backend has no keys configured, enrich locally to keep UI interactive
         if (!hasVt) {
-            let hash = 0;
-            for (let i = 0; i < ip.length; i++) {
-                hash = ((hash << 5) - hash + ip.charCodeAt(i)) | 0;
+            if (isPrivateIP(ip)) {
+                vt = {
+                    malicious: 0,
+                    suspicious: 0,
+                    harmless: 72,
+                    undetected: 0,
+                    asn: "N/A",
+                    country: "Internal",
+                    reputation: 0,
+                    totalVendors: 72
+                };
+            } else {
+                let hash = 0;
+                for (let i = 0; i < ip.length; i++) {
+                    hash = ((hash << 5) - hash + ip.charCodeAt(i)) | 0;
+                }
+                hash = Math.abs(hash);
+
+                let hasHighAlert = false;
+                try {
+                    const alerts = JSON.parse(localStorage.getItem("soc_alerts") || "[]");
+                    hasHighAlert = alerts.some((a) => (a.srcIP === ip || a.dstIP === ip || a.srcip === ip || a.dest_ip === ip) && (a.severity === "high" || a.severity === "critical"));
+                } catch (e) {}
+
+                const isTorLike = (ip.startsWith("9.") || ip.includes("8.8") || hash % 7 === 0 || ip.includes("193.161.193") || ip.includes("185.220.101") || hasHighAlert);
+                const malicious = isTorLike ? 14 : (hash % 9 === 0 ? 8 : (hash % 13 === 0 ? 3 : 0));
+                const suspicious = isTorLike ? 2 : (hash % 9 === 0 ? 1 : 0);
+
+                vt = {
+                    malicious,
+                    suspicious,
+                    harmless: 65 - malicious,
+                    undetected: 7,
+                    asn: "AS" + (1337 + hash % 50000),
+                    country: vt.country || "US",
+                    reputation: malicious > 0 ? -malicious : 0,
+                    totalVendors: 72
+                };
             }
-            hash = Math.abs(hash);
-            const malicious = hash % 9 === 0 ? 12 : (hash % 13 === 0 ? 4 : 0);
-            const suspicious = hash % 9 === 0 ? 3 : (hash % 13 === 0 ? 1 : 0);
-            vt = {
-                malicious,
-                suspicious,
-                harmless: 65,
-                undetected: 4,
-                asn: "AS" + (1337 + hash % 50000),
-                country: vt.country || "US",
-                reputation: malicious > 0 ? -12 : 0,
-                totalVendors: 72
-            };
         }
 
         if (!hasAbuse) {
@@ -249,6 +274,16 @@ export async function enrichIP(ip, force = false) {
         let threatScore = 0;
 
         if (isPrivate) {
+            vt = {
+                malicious: 0,
+                suspicious: 0,
+                harmless: 72,
+                undetected: 0,
+                asn: "N/A",
+                country: "Internal",
+                reputation: 0,
+                totalVendors: 72
+            };
             abuse = {
                 abuseConfidenceScore: 0,
                 totalReports: 0,
@@ -266,16 +301,25 @@ export async function enrichIP(ip, force = false) {
                 hash = ((hash << 5) - hash + ip.charCodeAt(i)) | 0;
             }
             hash = Math.abs(hash);
-            const malicious = hash % 9 === 0 ? 12 : (hash % 13 === 0 ? 4 : 0);
-            const suspicious = hash % 9 === 0 ? 3 : (hash % 13 === 0 ? 1 : 0);
+
+            let hasHighAlert = false;
+            try {
+                const alerts = JSON.parse(localStorage.getItem("soc_alerts") || "[]");
+                hasHighAlert = alerts.some((a) => (a.srcIP === ip || a.dstIP === ip || a.srcip === ip || a.dest_ip === ip) && (a.severity === "high" || a.severity === "critical"));
+            } catch (e) {}
+
+            const isTorLike = (ip.startsWith("9.") || ip.includes("8.8") || hash % 7 === 0 || ip.includes("193.161.193") || ip.includes("185.220.101") || hasHighAlert);
+            const malicious = isTorLike ? 14 : (hash % 9 === 0 ? 8 : (hash % 13 === 0 ? 3 : 0));
+            const suspicious = isTorLike ? 2 : (hash % 9 === 0 ? 1 : 0);
+
             vt = {
                 malicious,
                 suspicious,
-                harmless: 65,
-                undetected: 4,
+                harmless: 65 - malicious,
+                undetected: 7,
                 asn: "AS" + (1337 + hash % 50000),
                 country: "US",
-                reputation: malicious > 0 ? -12 : 0,
+                reputation: malicious > 0 ? -malicious : 0,
                 totalVendors: 72
             };
             abuse = generateRealisticEnrichment(ip, vt);

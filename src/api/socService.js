@@ -127,8 +127,8 @@ export async function getIncidentDetail(id) {
     return res.data || res;
 }
 
-export async function classifyIncident(id, classification, status) {
-    const res = await apiPatch(`v1/incidents/${id}/classify`, { classification, status });
+export async function classifyIncident(id, classification, status, comment = "") {
+    const res = await apiPatch(`v1/incidents/${id}/classify`, { classification, status, comment });
     return res.data || res;
 }
 
@@ -250,3 +250,14 @@ export async function deleteApiKey(id) {
     const res = await apiDelete(`v1/api-keys/${id}`);
     return res.data || res;
 }
+
+export async function addCaseTimelineEvent(id, eventData) {
+    const res = await apiPost(`v1/cases/${id}/timeline`, eventData);
+    return res.data || res;
+}
+
+export async function addIncidentNote(id, note) {
+    const res = await apiPost(`v1/incidents/${id}/notes`, { note });
+    return res.data || res;
+}
+

@@ -54,12 +54,70 @@ export default function Login() {
             navigate("/dashboard", { replace: true });
         }
 
-        // Check if MFA is pending via session storage
-        const pendingSession = sessionStorage.getItem("pending_session_id");
-        if (pendingSession) {
-            setMfaStep(true);
-        }
+        // Clear any stale MFA/OTP state on login page load to start fresh
+        sessionStorage.removeItem("pending_session_id");
+        sessionStorage.removeItem(LS_OTP_CREATED_AT);
     }, [navigate]);
+
+    const completeLogin = (responseData) => {
+        // Map backend role to frontend roleType safely handling objects
+        let rawRoleName = responseData.user?.role?.name || responseData.user?.role?.role || "";
+        if (rawRoleName && typeof rawRoleName === "object") {
+            rawRoleName = rawRoleName.en || rawRoleName.ar || "";
+        }
+        const roleStr = String(rawRoleName || "").toLowerCase();
+        const roleType = roleStr.includes("admin") 
+            ? "admin" 
+            : (roleStr.includes("viewer") ? "viewer" : "analyst");
+
+        // Store token and user information
+        localStorage.setItem(
+            LS_USER,
+            JSON.stringify({
+                id: String(responseData.user.id),
+                name: responseData.user.name,
+                email: responseData.user.email,
+                roleType: roleType
+            })
+        );
+        localStorage.setItem(LS_AUTH, "true");
+        localStorage.setItem(LS_ROLE, roleType);
+
+        // Set the display profile to avoid the default fallback override
+        const displayRoleLabel = roleType === "admin" ? "SOC Administrator" : roleType === "viewer" ? "SOC Viewer" : "SOC Analyst";
+        localStorage.setItem(
+            "soc_user",
+            JSON.stringify({
+                name: responseData.user.name,
+                role: rawRoleName || displayRoleLabel,
+                avatar: "",
+                email: responseData.user.email,
+            })
+        );
+
+        if (rememberMe) {
+            localStorage.setItem(LS_REMEMBER, "1");
+            localStorage.setItem(LS_LAST_EMAIL, email.trim().toLowerCase());
+        } else {
+            localStorage.removeItem(LS_REMEMBER);
+            localStorage.removeItem(LS_LAST_EMAIL);
+        }
+
+        // Clean up MFA session
+        sessionStorage.removeItem("pending_session_id");
+        sessionStorage.removeItem(LS_OTP_CREATED_AT);
+
+        addAuditLog({
+            action: AUDIT_ACTIONS.MFA_SUCCESS,
+            severity: AUDIT_SEVERITY.INFO,
+            user: responseData.user.name,
+            message: responseData.token ? `Login successful - Role: ${rawRoleName || displayRoleLabel}` : `MFA verification successful - Role: ${rawRoleName || displayRoleLabel}`,
+            entity: "authentication"
+        });
+        pushNotification(`${responseData.user.name} logged in`);
+        window.dispatchEvent(new Event("soc_system_refresh"));
+        navigate("/dashboard", { replace: true });
+    };
 
     const handleLogin = async () => {
         const newErrors = {};
@@ -93,6 +151,12 @@ export default function Login() {
         try {
             // Call real backend API
             const responseData = await loginUser(email, password);
+
+            // Direct login check
+            if (responseData.token) {
+                completeLogin(responseData);
+                return;
+            }
 
             // Save the session ID returned by backend
             sessionStorage.setItem("pending_session_id", responseData.session_id);
@@ -152,64 +216,7 @@ export default function Login() {
 
             // Verify with real backend
             const responseData = await verifyUserOtp(email, otpInput.trim(), sessionId);
-
-            // Map backend role to frontend roleType safely handling objects
-            let rawRoleName = responseData.user?.role?.name || responseData.user?.role?.role || "";
-            if (rawRoleName && typeof rawRoleName === "object") {
-                rawRoleName = rawRoleName.en || rawRoleName.ar || "";
-            }
-            const roleStr = String(rawRoleName || "").toLowerCase();
-            const roleType = roleStr.includes("admin") 
-                ? "admin" 
-                : (roleStr.includes("viewer") ? "viewer" : "analyst");
-
-            // Store token and user information
-            localStorage.setItem(
-                LS_USER,
-                JSON.stringify({
-                    id: String(responseData.user.id),
-                    name: responseData.user.name,
-                    email: responseData.user.email,
-                    roleType: roleType
-                })
-            );
-            localStorage.setItem(LS_AUTH, "true");
-            localStorage.setItem(LS_ROLE, roleType);
-
-            // Set the display profile to avoid the default fallback override
-            const displayRoleLabel = roleType === "admin" ? "SOC Administrator" : roleType === "viewer" ? "SOC Viewer" : "SOC Analyst";
-            localStorage.setItem(
-                "soc_user",
-                JSON.stringify({
-                    name: responseData.user.name,
-                    role: rawRoleName || displayRoleLabel,
-                    avatar: "",
-                    email: responseData.user.email,
-                })
-            );
-
-            if (rememberMe) {
-                localStorage.setItem(LS_REMEMBER, "1");
-                localStorage.setItem(LS_LAST_EMAIL, email.trim().toLowerCase());
-            } else {
-                localStorage.removeItem(LS_REMEMBER);
-                localStorage.removeItem(LS_LAST_EMAIL);
-            }
-
-            // Clean up MFA session
-            sessionStorage.removeItem("pending_session_id");
-            sessionStorage.removeItem(LS_OTP_CREATED_AT);
-
-            addAuditLog({
-                action: AUDIT_ACTIONS.MFA_SUCCESS,
-                severity: AUDIT_SEVERITY.INFO,
-                user: responseData.user.name,
-                message: `MFA verification successful - Role: ${rawRoleName || displayRoleLabel}`,
-                entity: "authentication"
-            });
-            pushNotification(`${responseData.user.name} logged in with MFA`);
-            window.dispatchEvent(new Event("soc_system_refresh"));
-            navigate("/dashboard", { replace: true });
+            completeLogin(responseData);
         } catch (error) {
             setMfaError(error.message || "Invalid OTP. Please try again.");
             addAuditLog({
