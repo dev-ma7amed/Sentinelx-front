@@ -1,20 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
+
+// Mock localStorage before importing platformStore (which executes forceStorageReset on load)
+let localStorageStore = {};
+global.localStorage = {
+  getItem: vi.fn((key) => localStorageStore[key] || null),
+  setItem: vi.fn((key, value) => { localStorageStore[key] = String(value); }),
+  removeItem: vi.fn((key) => { delete localStorageStore[key]; }),
+  clear: vi.fn(() => { localStorageStore = {}; }),
+  length: 0,
+  key: vi.fn((index) => Object.keys(localStorageStore)[index] || null),
+};
+
+const {
   classifyIncident,
   validateIncidentSync,
   getIncidentSyncState,
-} from "../utils/incidentWorkflow";
-import {
+} = await import("../utils/incidentWorkflow");
+
+const {
   forceResetAlerts,
   forceResetCases,
   forceResetIncidents,
   getAlerts,
   getCases,
+  setCases,
   getAuditLog,
   getNotifications,
   upsertIncident,
   updateStoredAlert,
-} from "../platformStore";
+} = await import("../platformStore");
 
 describe("Incident Classification Workflow", () => {
   beforeEach(() => {
@@ -262,6 +276,14 @@ describe("Incident Classification Workflow", () => {
         incidentId: "INC-011",
         falsePositive: false,
       });
+      setCases([
+        {
+          id: "case-11",
+          incidentId: "INC-011",
+          status: "closed",
+          resolution: "false_positive",
+        }
+      ]);
       upsertIncident(incident);
 
       const validation = validateIncidentSync("INC-011");
@@ -327,6 +349,20 @@ describe("Incident Classification Workflow", () => {
 
       upsertIncident(incident1);
       upsertIncident(incident2);
+      setCases([
+        {
+          id: "case-13",
+          incidentId: "INC-013",
+          status: "closed",
+          resolution: "true_positive",
+        },
+        {
+          id: "case-14",
+          incidentId: "INC-014",
+          status: "closed",
+          resolution: "true_positive",
+        }
+      ]);
 
       const state = getIncidentSyncState();
 

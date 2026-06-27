@@ -1,3 +1,4 @@
+import React from "react";
 import { Cpu, Network, Terminal } from "lucide-react";
 
 export const ALERTS_PLAIN = [

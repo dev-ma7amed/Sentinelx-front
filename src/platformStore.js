@@ -954,7 +954,14 @@ export function getAlerts() {
 export function updateStoredAlert(alertId, updater) {
     const raw = readRawAlerts();
     const idx = raw.findIndex((r) => r?.id === alertId);
-    if (idx < 0) return null;
+    if (idx < 0) {
+        const cur = { id: alertId };
+        const next = typeof updater === "function" ? updater(cur) : { ...cur, ...(updater || {}) };
+        const newAlert = { ...cur, ...next };
+        raw.push(newAlert);
+        writeRawAlerts(raw);
+        return newAlert;
+    }
     const cur = { ...raw[idx] };
     const next = typeof updater === "function" ? updater(cur) : { ...cur, ...(updater || {}) };
     raw[idx] = { ...cur, ...next };
