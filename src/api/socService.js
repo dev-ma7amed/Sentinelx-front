@@ -179,6 +179,11 @@ export async function getMitreMapping(alertId) {
     return res.data || res;
 }
 
+export async function getMitreMappingBatch(alertIds) {
+    const res = await apiPost("v1/intelligence/mitre/batch", { alert_ids: alertIds });
+    return res.data || res;
+}
+
 // ==========================================
 // USERS (ADMINS)
 // ==========================================

@@ -18,7 +18,8 @@ import {
     getBackendNotifications,
     getDetectionRules,
     updateBackendIntegration,
-    getMitreMapping
+    getMitreMapping,
+    getMitreMappingBatch
 } from "./api/socService";
 
 const LS_ALERTS = "soc_alerts";
@@ -2440,6 +2441,18 @@ if (typeof window !== "undefined") {
     };
 }
 
+let isSyncing = false;
+let lastSyncTime = 0;
+let lastOperationalSyncTime = 0;
+let debounceTimeout = null;
+
+export function debouncedSync(delay = 500) {
+    if (debounceTimeout) clearTimeout(debounceTimeout);
+    debounceTimeout = setTimeout(() => {
+        syncWithBackend().catch(err => console.error("Debounced sync failed:", err));
+    }, delay);
+}
+
 export async function syncWithBackend() {
     if (typeof window === "undefined") return;
 
@@ -2448,6 +2461,20 @@ export async function syncWithBackend() {
         console.log("🔄 SentinelX: No auth token found. Skipping sync.");
         return;
     }
+
+    const now = Date.now();
+    if (now - lastSyncTime < 10000) {
+        console.log("🔄 SentinelX: Sync throttled (cooldown).");
+        return;
+    }
+
+    if (isSyncing) {
+        console.log("🔄 SentinelX: Sync already in progress. Skipping concurrent run.");
+        return;
+    }
+
+    isSyncing = true;
+    lastSyncTime = now;
 
     const curUserRaw = localStorage.getItem("currentUser");
     let userRole = "analyst";
@@ -2493,7 +2520,13 @@ export async function syncWithBackend() {
             }
         }
 
-        await syncOperationalData(userRole);
+        // Only sync operational data once every 60 seconds
+        if (now - lastOperationalSyncTime >= 60000) {
+            await syncOperationalData(userRole);
+            lastOperationalSyncTime = now;
+        } else {
+            console.log("🔄 SentinelX: Skipping operational data sync (cooldown).");
+        }
 
         // ═══════════════════════════════════════════════════════════════════════════════
         // DYNAMIC DEDICATED MITRE CACHE INTEGRATION
@@ -2514,32 +2547,36 @@ export async function syncWithBackend() {
         });
         
         if (newAlertsToFetch.length > 0 && (userRole === "admin" || userRole === "analyst")) {
-            console.log(`🔍 SentinelX: Fetching dynamic MITRE mappings for ${newAlertsToFetch.length} new/updated alerts...`);
-            const mitrePromises = newAlertsToFetch.map(async (a) => {
-                try {
-                    const mRes = await getMitreMapping(a.id);
-                    const mappingData = mRes?.mapping || mRes?.data?.mapping || mRes;
-                    if (mappingData && mappingData.technique_id) {
-                        return { id: a.id, mapping: mappingData };
-                    }
-                } catch (e) {
-                    console.warn(`Could not fetch MITRE mapping for alert ${a.id}:`, e);
-                }
-                return { id: a.id, mapping: null };
-            });
+            console.log(`🔍 SentinelX: Fetching dynamic MITRE mappings in batch for ${newAlertsToFetch.length} new/updated alerts...`);
             
-            const results = await Promise.all(mitrePromises);
-            results.forEach(r => {
-                if (r.mapping) {
-                    const alert = rawAlertsArray.find(a => a.id === r.id);
-                    mitreCache[r.id] = {
-                        ...r.mapping,
-                        title: alert?.title || alert?.desc || alert?.description,
-                        alert_type: alert?.alert_type || alert?.type
-                    };
-                    cacheUpdated = true;
+            const chunkSize = 50;
+            const chunks = [];
+            for (let i = 0; i < newAlertsToFetch.length; i += chunkSize) {
+                chunks.push(newAlertsToFetch.slice(i, i + chunkSize));
+            }
+
+            for (const chunk of chunks) {
+                try {
+                    const alertIds = chunk.map(a => a.id);
+                    const batchRes = await getMitreMappingBatch(alertIds);
+                    const mappings = batchRes || {};
+                    Object.keys(mappings).forEach(alertId => {
+                        const item = mappings[alertId];
+                        const mappingData = item?.mapping || item;
+                        if (mappingData && mappingData.technique_id) {
+                            const alert = rawAlertsArray.find(a => String(a.id) === String(alertId));
+                            mitreCache[alertId] = {
+                                ...mappingData,
+                                title: alert?.title || alert?.desc || alert?.description,
+                                alert_type: alert?.alert_type || alert?.type
+                            };
+                            cacheUpdated = true;
+                        }
+                    });
+                } catch (e) {
+                    console.warn(`Could not fetch MITRE mapping batch:`, e);
                 }
-            });
+            }
             
             if (cacheUpdated) {
                 writeJson(LS_MITRE_CACHE, mitreCache);
@@ -2667,6 +2704,8 @@ export async function syncWithBackend() {
         emitPlatformDataChanged();
     } catch (err) {
         console.error("❌ SentinelX: Real backend synchronization failed:", err);
+    } finally {
+        isSyncing = false;
     }
 }
 

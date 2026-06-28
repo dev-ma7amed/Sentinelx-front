@@ -16,6 +16,7 @@ import { canMutate, getCurrentUser, logoutSession, userDisplayName, isAdmin } fr
 import { formatTime } from "../utils/formatTime";
 import { getCases, getIncidents, createCaseFromIncident, pushAudit, pushNotification, setCases, syncIncidentStatusWithCase, executeUnifiedAction, syncWithBackend } from "../platformStore";
 import { addAuditLog, AUDIT_ACTIONS, AUDIT_SEVERITY } from "../services/auditLogger";
+import { addCaseTimelineEvent, addCaseNote } from "../api/socService";
 
 const PHASES = ["detection", "triage", "containment", "eradication", "recovery", "closed"];
 
@@ -301,8 +302,7 @@ export default function Cases() {
         const actionText = `${map[action] || action} by ${analyst}`;
 
         try {
-            const api = await import("../api/socService");
-            await api.addCaseTimelineEvent(selectedCaseId, {
+            await addCaseTimelineEvent(selectedCaseId, {
                 title: map[action] || action,
                 text: `Action performed by ${analyst}`,
                 type: "secondary"
@@ -493,8 +493,7 @@ export default function Cases() {
         if (!t) return;
         setSaveNoteBusy(true);
         try {
-            const api = await import("../api/socService");
-            await api.addCaseNote(selectedCaseId, t);
+            await addCaseNote(selectedCaseId, t);
 
             updateSelectedCaseState((cur) => ({
                 ...cur,

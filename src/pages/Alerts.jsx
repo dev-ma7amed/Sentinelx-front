@@ -175,14 +175,7 @@ export default function Alerts({ view } = {}) {
         localStorage.setItem("alerts_appliedTime", appliedTime);
     }, [appliedTime]);
 
-    useEffect(() => {
-        // Auto-refresh alerts every 30 seconds
-        const timer = setInterval(() => {
-            console.log("Auto-refreshing alerts via background sync...");
-            syncWithBackend().catch(err => console.error("Auto-refresh sync failed:", err));
-        }, 30000);
-        return () => clearInterval(timer);
-    }, []);
+
 
     const SOURCE_KEYS = useMemo(() => ["all", "Wazuh", "Sysmon", "Suricata", "Network ML"], []);
     const SEVERITY_KEYS = useMemo(() => ["all", "highcrit", "critical", "high", "medium", "low"], []);

@@ -4,7 +4,7 @@ import { HeaderMenuAvatar, HeaderNotificationBell, HeaderSettingsNav } from "../
 import { SocLogo } from "../components/SocLogo";
 import { logoutSession } from "../session";
 import { buildTrendData, getAlerts, getSeverityCounts, getTelemetry } from "../store/socStore";
-import { calculateMTTR, getCases, getIncidents, syncWithBackend } from "../platformStore";
+import { calculateMTTR, getCases, getIncidents, syncWithBackend, debouncedSync } from "../platformStore";
 import { BASE_URL } from "../api/client";
 import {
     RefreshCw, Download, Bell, BellRing, Home,
@@ -270,6 +270,7 @@ export default function Dashboard() {
     const [integTick, setIntegTick] = useState(0);
     const [lastSync, setLastSync] = useState(() => new Date());
     const [refreshBusy, setRefreshBusy] = useState(false);
+    const [isSseActive, setIsSseActive] = useState(false);
     const alerts = useMemo(() => getAlerts(), [dashRefresh, dashVersion, integTick, liveTick]);
     const incidents = useMemo(() => getIncidents(), [dashRefresh, dashVersion, integTick, liveTick]);
 
@@ -332,13 +333,20 @@ export default function Dashboard() {
         console.log("🔌 SentinelX: Connecting to live telemetry stream...", sseUrl);
         const eventSource = new EventSource(sseUrl);
 
+        eventSource.onopen = () => {
+            console.log("🔌 SentinelX: Telemetry stream connected successfully");
+            setIsSseActive(true);
+        };
+
         eventSource.onmessage = (event) => {
             try {
                 const alert = JSON.parse(event.data);
                 console.log("🚨 SentinelX: Live Telemetry Event Received:", alert);
                 
-                // Trigger backend data sync to pull the newly created alerts/incidents/cases
-                syncWithBackend();
+                setIsSseActive(true);
+                
+                // Trigger backend data sync (debounced to avoid multiple quick requests)
+                debouncedSync(500);
             } catch (err) {
                 console.error("Error parsing telemetry stream message:", err);
             }
@@ -346,6 +354,7 @@ export default function Dashboard() {
 
         eventSource.onerror = (err) => {
             console.error("SentinelX: Telemetry stream connection error or closed:", err);
+            setIsSseActive(false);
             eventSource.close();
         };
 
@@ -356,14 +365,23 @@ export default function Dashboard() {
     }, []);
 
     useEffect(() => {
-        // Slow fallback poll to keep everything in absolute synchronization
+        // Fallback poll: only run if SSE is NOT active.
+        // If SSE is active, we don't need polling at all.
+        // If SSE is down, we fallback to a 60-second polling interval.
+        if (isSseActive) {
+            console.log("🔄 SentinelX: SSE is active. Polling disabled.");
+            return;
+        }
+        
+        console.log("🔄 SentinelX: SSE inactive. Starting fallback poll (60s)...");
         const id = setInterval(() => {
             syncWithBackend();
             setLastSync(new Date());
             setLiveTick((n) => n + 1);
-        }, 15000);
+        }, 60000);
+        
         return () => clearInterval(id);
-    }, []);
+    }, [isSseActive]);
 
     const dashDerived = useMemo(() => {
         try {

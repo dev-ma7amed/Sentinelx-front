@@ -30,6 +30,7 @@ import {
 } from "../platformStore";
 import { getAlerts, updateAlert } from "../store/socStore";
 import { classifyIncident } from "../utils/incidentWorkflow";
+import { getIncidentDetail, addCaseNote, addIncidentNote } from "../api/socService";
 
 // ── Stage detection ────────────────────────────────────────────────────────────
 function detectStage(a) {
@@ -252,8 +253,7 @@ export default function IncidentPage() {
         const fetchDetail = async () => {
             setLoadingDetail(true);
             try {
-                const api = await import("../api/socService");
-                const res = await api.getIncidentDetail(id);
+                const res = await getIncidentDetail(id);
                 if (!isMounted) return;
                 if (res) {
                     console.log("Fetched active incident detail from DB:", res);
@@ -600,12 +600,11 @@ export default function IncidentPage() {
 
         try {
             const caseId = incident?.caseId;
-            const api = await import("../api/socService");
             if (caseId) {
-                await api.addCaseNote(caseId, t);
+                await addCaseNote(caseId, t);
                 pushNotification(`Note added to Case ${caseId}`);
             } else {
-                await api.addIncidentNote(incident.id, t);
+                await addIncidentNote(incident.id, t);
                 pushNotification(`Note added to Incident ${incident.id}`);
             }
 
