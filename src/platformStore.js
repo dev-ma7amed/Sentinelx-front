@@ -754,6 +754,7 @@ export function normalizeAlert(alert) {
     const type = pickText(
         rest.type,
         rest.event_type,
+        rest.alert_type,
         rest.rule?.description,
     ) || "Security Alert";
     const desc = pickText(
@@ -2594,6 +2595,7 @@ export async function syncWithBackend() {
                     dstIP: a.dest_ip || a.destip || "0.0.0.0",
                     desc: a.description || a.desc || "Security Event Alert",
                     createdAt: a.alerted_at || a.created_at || a.createdAt || new Date().toISOString(),
+                    type: a.alert_type || a.type || "Unknown Alert",
                     assignedTo: a.assigned_to || a.assignedTo || null,
                     incidentId: a.incident_id || a.incidentId || null,
                     correlationId: a.correlation_id || a.correlationId || null,

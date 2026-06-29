@@ -72,7 +72,8 @@ function normalizeAlert(a) {
     }
   }
 
-  const mitre = a.mitre || detectMitre(a);
+  const alertType = a.alert_type || a.type || "Unknown Alert";
+  const mitre = a.mitre || detectMitre({ ...a, type: alertType });
   const srcKey = a.srcIP || a?.data?.srcip || "unknown";
   const correlationId = a.correlationId || `corr-${String(srcKey).replace(/\./g, "-")}`;
   const incidentId = a.incidentId != null ? a.incidentId : a.incident_id != null ? a.incident_id : null;
@@ -106,6 +107,7 @@ function normalizeAlert(a) {
   }
   return {
     ...a,
+    type: alertType,
     severity,
     source: a.source || "Suricata",
     status: baseStatus.toLowerCase().trim(),

@@ -381,6 +381,7 @@ export default function Alerts({ view } = {}) {
         });
         const incidents = getIncidents();
         let incident = incidents.find((i) => Array.isArray(i.alertIds) && i.alertIds.includes(alert.id));
+        const srcIP = alert.srcIP || alert.src_ip;
         if (!incident && srcIP) {
             incident = incidents.find((i) => i.ip === srcIP || i.sourceIP === srcIP);
         }

@@ -3,8 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { LogOut, Settings } from "lucide-react";
 import { getCurrentUser, readSocUsers, roleLabelFromType, userDisplayName } from "../session";
 import { readSocProfile } from "../socProfile";
-import { getAlerts, getCases } from "../platformStore";
-import { getBackendNotifications, markAllNotificationsRead, markNotificationRead } from "../api/socService";
+import { getAlerts, getCases, getNotifications, setNotifications, syncWithBackend } from "../platformStore";
+import { markAllNotificationsRead, markNotificationRead } from "../api/socService";
 import { formatTime } from "../utils/formatTime";
 import "../styles/socHeaderOverlays.css";
 
@@ -145,13 +145,9 @@ export function HeaderNotificationBell({ className, badgeClassName, children }) 
         return GROUP_ORDER.map((k) => ({ key: k, title: GROUP_TITLES[k], list: m.get(k) || [] })).filter((x) => x.list.length);
     }, [items]);
 
-    const fetchNotifications = async () => {
-        try {
-            const rows = await getBackendNotifications({ per_page: 50 });
-            setItems((Array.isArray(rows) ? rows : []).map(normalizeNotification));
-        } catch (error) {
-            console.error("Failed to load notifications:", error);
-        }
+    const loadFromStore = () => {
+        const rows = getNotifications();
+        setItems((Array.isArray(rows) ? rows : []).map(normalizeNotification));
     };
 
     useEffect(() => {
@@ -171,35 +167,37 @@ export function HeaderNotificationBell({ className, badgeClassName, children }) 
     }, [open]);
 
     useEffect(() => {
-        fetchNotifications();
-        const interval = window.setInterval(fetchNotifications, 30000);
-        const onStore = () => fetchNotifications();
+        loadFromStore();
+        const onStore = () => loadFromStore();
         window.addEventListener("soc_notifications_update", onStore);
         return () => {
-            window.clearInterval(interval);
             window.removeEventListener("soc_notifications_update", onStore);
         };
     }, []);
 
     const markAsRead = async (id) => {
-        setItems((prev) => prev.map((item) => (
-            item.id === id ? { ...item, read: true, unread: false, is_read: true } : item
-        )));
+        const currentNotifs = getNotifications();
+        const updated = currentNotifs.map(item => 
+            String(item.id) === String(id) ? { ...item, read: true, unread: false, is_read: true } : item
+        );
+        setNotifications(updated);
         try {
             await markNotificationRead(id);
         } catch (error) {
             console.error("Failed to mark notification as read:", error);
-            fetchNotifications();
+            await syncWithBackend();
         }
     };
 
     const markAllRead = async () => {
-        setItems((prev) => prev.map((item) => ({ ...item, read: true, unread: false, is_read: true })));
+        const currentNotifs = getNotifications();
+        const updated = currentNotifs.map(item => ({ ...item, read: true, unread: false, is_read: true }));
+        setNotifications(updated);
         try {
             await markAllNotificationsRead();
         } catch (error) {
             console.error("Failed to mark notifications as read:", error);
-            fetchNotifications();
+            await syncWithBackend();
         }
     };
 

@@ -100,6 +100,7 @@ export default function IncidentPage() {
     const hydrateRetryRef = useRef(false);
     const scanTimerRef = useRef(null);
     const autoEscalateRef = useRef(false);
+    const fetchedRef = useRef(null);
     const sourceAlert = location.state?.alertId || null;
     const [incident, setIncident] = useState(null);
     const isLive = typeof window !== "undefined" && !!(localStorage.getItem("auth_token") || localStorage.getItem("isAuthToken"));
@@ -248,6 +249,10 @@ export default function IncidentPage() {
             setLoadingDetail(false);
             return;
         }
+        if (fetchedRef.current === id) {
+            return;
+        }
+        fetchedRef.current = id;
 
         let isMounted = true;
         const fetchDetail = async () => {
@@ -298,6 +303,9 @@ export default function IncidentPage() {
                 }
             } catch (err) {
                 console.error("Error fetching incident detail:", err);
+                if (isMounted) {
+                    fetchedRef.current = null;
+                }
             } finally {
                 if (isMounted) {
                     setLoadingDetail(false);
